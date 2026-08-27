@@ -1,0 +1,382 @@
+# Lawlah scraper
+
+Pipeline for Lawlah, an AI system for Singapore lawyers.
+
+It scrapes legislation from [sso.gov.sg](https://sso.gov.sg) and case law from [LawNet](https://www.lawnet.com), checks that each document is complete, then loads a knowledge base the product can search and classify.
+
+Scrapes never write straight into the knowledge base. Raw fetches land in `raw_source`. Only documents that pass parse checks are promoted to `knowledge_base`. Classification is a later step.
+
+Two Postgres databases on one instance:
+
+| Database | Role |
+|---|---|
+| `raw_source` | Landing zone. Source-shaped: URL, HTML, LawNet JSON, parse status. |
+| `knowledge_base` | Serving graph. Cases, legislation, provisions, paragraphs, taxonomy, aliases, references. |
+
+LawNet is the only case source. Acts have versions. Cases and subsidiary legislation do not.
+
+---
+
+## Contents
+
+- [Raw source](#raw-source)
+  - [Cases](#raw-source-cases)
+    - [raw_cases](#raw_cases)
+    - [raw_case_documents](#raw_case_documents)
+  - [Acts](#raw-source-acts)
+    - [raw_acts](#raw_acts)
+    - [raw_act_versions](#raw_act_versions)
+- [Knowledge base](#knowledge-base)
+  - [Cases](#cases)
+    - [courts](#courts)
+    - [cases](#cases-1)
+    - [judges](#judges)
+    - [case_judges](#case_judges)
+    - [parties](#parties)
+    - [case_parties](#case_parties)
+    - [counsels](#counsels)
+    - [case_counsels](#case_counsels)
+  - [Legislation](#legislation)
+    - [acts](#acts)
+    - [act_versions](#act_versions)
+    - [subsidiary_legislations](#subsidiary_legislations)
+  - [Provisions](#provisions)
+  - [Paragraphs](#paragraphs)
+  - [Taxonomy](#taxonomy)
+    - [topics](#topics)
+    - [concepts](#concepts)
+    - [functional_roles](#functional_roles)
+    - [Junctions](#taxonomy-junctions)
+  - [Aliases](#aliases)
+  - [References](#references)
+
+---
+
+## Raw source
+
+Work items and fetched HTML. Not a second copy of the knowledge-base graph.
+
+Search creates a `raw_cases` row. The document API fills `raw_case_documents`. Browse creates a `raw_acts` row. Each timeline date fills `raw_act_versions`. Promote only when `parse_status` is `complete`.
+
+### Raw source cases
+
+### raw_cases
+
+One row per citation we know about. The work item. `date` is a scrape cursor, taken from the LawNet search hit. Everything else from search stays in `search_result`.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `neutral_citation` | string, unique | Identity, e.g. `[2026] SGHC 164`. |
+| `date` | date, nullable | Decision date. Used to scrape incrementally. |
+| `status` | string | `discovered` / `fetch_failed` / `parse_incomplete` / `complete` / `needs_review`. |
+| `search_result` | jsonb, nullable | LawNet search item as-is (`titles`, `ncitation`, `dates`, `courts`, `casenumber`, `corams`, `catchword`, …). |
+
+### raw_case_documents
+
+One LawNet snapshot per case. Re-fetch overwrites this row.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `raw_case_id` | integer, unique | FK → `raw_cases`. |
+| `source_url` | text | LawNet document URL. |
+| `http_status` | integer, nullable | HTTP status of the fetch. |
+| `fetch_status` | string | `success` / `not_found` / `error`. |
+| `fetch_error` | text, nullable | Error message when the fetch fails. |
+| `html` | text, nullable | Judgment HTML from the LawNet document API. |
+| `source_metadata` | jsonb, nullable | LawNet document `metadata` as-is (`CaseTitle`, `CaseNumber`, `Parties`, `Counsels`, `Corams`, …). |
+| `layout` | string, nullable | Detected HTML layout: `modern_judg1` / `numbered_plain_p` / `unnumbered_br` / `single_block` / `unknown`. |
+| `parse_status` | string | `not_parsed` / `complete` / `incomplete` / `unknown_layout` / `failed`. |
+| `expected_paragraph_count` | integer, nullable | Numbered layouts only: the max paragraph number. `NULL` when the layout has no numbers. |
+| `extracted_paragraph_count` | integer, nullable | Paragraphs the parser produced. |
+| `needs_review` | boolean | Unknown layout or incomplete parse. |
+
+### Raw source acts
+
+### raw_acts
+
+One row per current act from the SSO browse list. The work item. Slug is the path id (`AA2004`).
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `slug` | string, unique | Act id from the URL, e.g. `AA2004`. |
+| `title` | string | Title from the browse list. |
+| `source_url` | text | Current act URL, e.g. `https://sso.agc.gov.sg/Act/AA2004`. |
+| `status` | string | `discovered` / `fetch_failed` / `parse_incomplete` / `complete` / `needs_review`. |
+
+### raw_act_versions
+
+One snapshot per timeline date. Unique on `(raw_act_id, valid_from)`. `html` is the assembled `#legisContent` after lazy-load, not the first-page stub. An act is complete when every timeline date has a complete version.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `raw_act_id` | integer | FK → `raw_acts`. |
+| `valid_from` | date | Version date from the timeline (`ValidDate`). |
+| `is_current` | boolean | The version in force now. |
+| `source_url` | text | Current URL or `/Act/AA2004/Historical/20241209?…`. |
+| `http_status` | integer, nullable | HTTP status of the fetch. |
+| `fetch_status` | string | `success` / `not_found` / `error`. |
+| `fetch_error` | text, nullable | Error message when the fetch fails. |
+| `html` | text, nullable | Full act HTML after lazy-load. |
+| `source_metadata` | jsonb, nullable | SSO `global-vars` / that timeline item. |
+| `parse_status` | string | `not_parsed` / `complete` / `incomplete` / `unknown_layout` / `failed`. |
+| `expected_provision_count` | integer, nullable | TOC / fragment count. |
+| `extracted_provision_count` | integer, nullable | `div.prov1` the parser produced. |
+| `needs_review` | boolean | Incomplete parse or stub HTML. |
+
+---
+
+## Knowledge base
+
+Only promoted, complete documents. This is what the product queries.
+
+### Cases
+
+#### courts
+
+Singapore court, keyed by the code in the neutral citation (`SGHC`, `SGCA`, `SGHC(I)`, …).
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `code` | string, unique | Citation code, e.g. `SGHC`. |
+| `name` | string | Display name, e.g. `General Division of the High Court`. |
+
+#### cases
+
+One judgment. `case_number` is the court file number (`Originating Application Nos 1149 of 2025 and 256 of 2026`), not the number inside the neutral citation. Year is not stored; `date` is enough.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `court_id` | integer | FK → `courts`. |
+| `date` | date | Decision date. |
+| `uri` | string, unique | Stable document URI. |
+| `title` | string | Case title, e.g. `DVV v DVW and another matter`. |
+| `neutral_citation` | string, unique | `[2026] SGHC 164`. |
+| `case_number` | string, nullable | Court file number from LawNet `CaseNumber`. |
+
+#### judges
+
+People who sat on the case. LawNet calls this **coram**, not parties.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `full_name` | string | Name as given, e.g. `Dedar Singh Gill`. |
+| `title` | string, nullable | Judicial title, e.g. `J`. |
+
+#### case_judges
+
+Which judges sat on which case.
+
+| Column | Type | Description |
+|---|---|---|
+| `case_id` | integer | FK → `cases`. Part of primary key. |
+| `judge_id` | integer | FK → `judges`. Part of primary key. |
+
+#### parties
+
+Litigants. Unique on `name` — we only ever have the string. The same company in many cases is one row. Anonymized names such as `DVV` can collide; we cannot disambiguate them.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `name` | string, unique | Party name from LawNet `Parties.Party`. |
+
+#### case_parties
+
+| Column | Type | Description |
+|---|---|---|
+| `case_id` | integer | FK → `cases`. Part of primary key. |
+| `party_id` | integer | FK → `parties`. Part of primary key. |
+| `role` | string, nullable | Role when LawNet sends it (`applicant`, `respondent`, …). |
+
+#### counsels
+
+Counsel as people, unique on `name`. LawNet sends appearance lines (`Cavinder Bull SC, … (Drew & Napier LLC) for the applicant`), not a list of people. A later parser splits those lines into rows here.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `name` | string, unique | Normalized person name. |
+
+#### case_counsels
+
+| Column | Type | Description |
+|---|---|---|
+| `case_id` | integer | FK → `cases`. Part of primary key. |
+| `counsel_id` | integer | FK → `counsels`. Part of primary key. |
+| `represents` | string, nullable | Side they appeared for (`applicant`, `respondent`, `appellant`, …). Text, not a closed enum. |
+
+---
+
+### Legislation
+
+Versions exist only for acts. Subsidiary legislation is a single current document.
+
+#### acts
+
+The work: the statute as a named thing over time.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `uri` | string, unique | Stable act URI. |
+| `title` | string | Act title. |
+
+#### act_versions
+
+One row per version of an act. Unique on `(act_id, valid_from)`. At most one `is_current` row per act.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `act_id` | integer | FK → `acts`. |
+| `uri` | string, unique | URI of this version on SSO. |
+| `valid_from` | date | Date this version took effect. |
+| `is_current` | boolean | The version in force now. |
+
+#### subsidiary_legislations
+
+Rules, regulations, orders. No version history.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `act_id` | integer, nullable | Parent act when known. |
+| `uri` | string, unique | Stable SL URI. |
+| `title` | string | Title. |
+| `number` | string | SL number, e.g. `S 123/2020`. |
+| `date` | date | Date of the instrument. |
+
+---
+
+### Provisions
+
+One tree of provisions per act version or per subsidiary legislation. Exactly one parent document: `act_version_id` or `subsidiary_legislation_id`, not both.
+
+`ordinal` and `descendant_count` are a nested set for outline queries (section plus its children) without walking the tree.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `act_version_id` | integer, nullable | FK → `act_versions`. Set for act trees. |
+| `subsidiary_legislation_id` | integer, nullable | FK → `subsidiary_legislations`. Set for SL trees. |
+| `parent_id` | integer, nullable | FK → `provisions`. Parent node in the same tree. |
+| `functional_role_id` | integer, nullable | FK → `functional_roles`. Classification. |
+| `uri` | string, unique | Stable provision URI. |
+| `kind` | string | `part` / `division` / `subdivision` / `section` / `subsection` / `proviso` / `point` / `opening`. |
+| `ordinal` | integer | Nested-set left position in the document. |
+| `level` | integer | Depth in the tree. |
+| `citation` | string, nullable | Pinpoint, e.g. `s 12(1)`. |
+| `heading` | string, nullable | Heading text. |
+| `content` | text, nullable | Body text. |
+| `descendant_count` | integer | Size of the subtree, for outline slices. |
+| `embedding` | vector(1536), nullable | Embedding of the provision text. |
+
+---
+
+### Paragraphs
+
+Numbered (or ordered) units of a judgment. Classification and references attach here.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `case_id` | integer | FK → `cases`. |
+| `functional_role_id` | integer, nullable | FK → `functional_roles`. Classification. |
+| `uri` | string, unique | Stable paragraph URI. |
+| `ordinal` | integer | Order in the judgment. |
+| `number` | string, nullable | Printed number when the layout has one (`1`, `12`). |
+| `content` | text | Paragraph text. |
+| `embedding` | vector(1536), nullable | Embedding of the paragraph text. |
+
+---
+
+### Taxonomy
+
+Topics contain concepts. Functional roles describe what a paragraph or provision *does* (holding, issue, definition, …), not what it is about.
+
+#### topics
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `name` | string, unique | Topic name. |
+| `description` | text | What this topic covers. |
+
+#### concepts
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `topic_id` | integer | FK → `topics`. |
+| `name` | string, unique | Concept name. |
+| `description` | text | What this concept covers. |
+
+#### functional_roles
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `name` | string, unique | Role name. |
+| `description` | text | What this role means. |
+| `applies_to` | string | `case` or `legislation`. |
+
+#### Taxonomy junctions
+
+Same shape on all six: two foreign keys, composite primary key.
+
+| Table | Links |
+|---|---|
+| `case_topics` | `cases` ↔ `topics` |
+| `case_concepts` | `cases` ↔ `concepts` |
+| `paragraph_topics` | `paragraphs` ↔ `topics` |
+| `paragraph_concepts` | `paragraphs` ↔ `concepts` |
+| `provision_topics` | `provisions` ↔ `topics` |
+| `provision_concepts` | `provisions` ↔ `concepts` |
+
+| Column | Type | Description |
+|---|---|---|
+| `{left}_id` | integer | FK to the document or node. Part of primary key. |
+| `{right}_id` | integer | FK to `topics` or `concepts`. Part of primary key. |
+
+---
+
+### Aliases
+
+Short names used inside one case (`the Act`, `the 2012 Regulations`). Scoped to the case. Unique on `(case_id, short_name)`.
+
+An alias points at a document. A [reference](#references) can then point at this alias and add a pincite.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `case_id` | integer | The case that uses this short name. |
+| `short_name` | string | The short form as written. |
+| `expanded_text` | string | What it expands to. |
+| `target_act_id` | integer, nullable | Resolved act, when known. |
+| `target_case_id` | integer, nullable | Resolved case, when known. |
+
+---
+
+### References
+
+A citation from a paragraph to an act, provision, case, or paragraph. At most one of the four targets. Zero targets means the cite is still unresolved.
+
+`alias_id` is set when the paragraph used a short name from `aliases`.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `source_paragraph_id` | integer | Paragraph that contains the citation. |
+| `alias_id` | integer, nullable | Short name used in that paragraph, if any. |
+| `target_act_id` | integer, nullable | Cited act. |
+| `target_provision_id` | integer, nullable | Cited provision. |
+| `target_case_id` | integer, nullable | Cited case. |
+| `target_paragraph_id` | integer, nullable | Cited paragraph (pincite). |
+| `quoted_text` | text | The citation text as written. |
