@@ -19,6 +19,9 @@ LawNet is the only case source. Acts have versions. Cases and subsidiary legisla
 
 ## Contents
 
+- [Case scrape entry points](#case-scrape-entry-points)
+- [Case parse entry points](#case-parse-entry-points)
+- [Case promote entry points](#case-promote-entry-points)
 - [Raw source](#raw-source)
   - [Cases](#raw-source-cases)
     - [raw_cases](#raw_cases)
@@ -49,6 +52,157 @@ LawNet is the only case source. Acts have versions. Cases and subsidiary legisla
     - [Junctions](#taxonomy-junctions)
   - [Aliases](#aliases)
   - [References](#references)
+
+---
+
+## Case scrape entry points
+
+These write to `raw_source` only. They do not parse layouts or promote to the knowledge base.
+
+`CaseRawScraper.run` is the usual entry. It opens a session, discovers cases, then fetches pending documents. Use `CaseSearchScraper.discover` or `CaseDocumentScraper.fetch_pending` when you want one step on its own.
+
+### `CaseRawScraper.run`
+
+Discover LawNet search hits, then fetch documents that are still pending.
+
+| Argument | Type | Description |
+|---|---|---|
+| `max_search_pages` | `int \| None` | How many search pages to walk. `None` means until LawNet returns an empty page. |
+| `max_documents` | `int \| None` | How many pending documents to fetch. `None` means all pending. |
+| `until_latest_stored_date` | `bool` | Default `True`. Search is `date-desc`. Stop after a hit older than the latest `raw_cases.date`. Same-day cases are still stored. `False` walks the whole catalog (first load or a manual backfill). |
+
+```python
+from src.cases.scrape import CaseRawScraper
+
+# Incremental update (cron)
+CaseRawScraper().run(max_search_pages=None, max_documents=None)
+
+# First load
+CaseRawScraper().run(
+    max_search_pages=None,
+    max_documents=None,
+    until_latest_stored_date=False,
+)
+
+# Smoke test
+CaseRawScraper().run(max_search_pages=2, max_documents=16, until_latest_stored_date=False)
+```
+
+### `CaseSearchScraper.discover`
+
+Walk LawNet search and insert missing `raw_cases`. Returns how many rows were added.
+
+| Argument | Type | Description |
+|---|---|---|
+| `max_pages` | `int \| None` | Page cap. `None` means until search is empty. |
+| `until_latest_stored_date` | `bool` | Same stop rule as `run`. |
+
+Needs a `RawCaseRepository` and a `LawNetClient`.
+
+```python
+added = CaseSearchScraper(repository, client).discover(
+    max_pages=None,
+    until_latest_stored_date=True,
+)
+```
+
+### `CaseDocumentScraper.fetch_pending`
+
+Fetch LawNet documents for `raw_cases` that have no successful `raw_case_documents` row. Returns how many documents were attempted.
+
+| Argument | Type | Description |
+|---|---|---|
+| `max_documents` | `int \| None` | How many pending citations to fetch. `None` means all pending. |
+
+Needs a `RawCaseRepository` and `ScrapeLimits`.
+
+```python
+fetched = CaseDocumentScraper(repository, limits).fetch_pending(max_documents=80)
+```
+
+---
+
+## Case parse entry points
+
+These write to `raw_source` only. They do not store paragraph text or promote to the knowledge base.
+
+`CaseRawParser.run` is the usual entry. It opens a session and parses fetched documents that are still `not_parsed`. Use `CaseDocumentParser.parse_pending` when you already have a session.
+
+Detected layouts: `modern_judg1`, `numbered_plain_p`, `unnumbered_br`. Anything else is `unknown_layout` and `needs_review`.
+
+### `CaseRawParser.run`
+
+Parse successful `raw_case_documents` that are still `not_parsed`. Writes `layout`, counts, `parse_status`, and `needs_review` on the same row.
+
+| Argument | Type | Description |
+|---|---|---|
+| `max_documents` | `int \| None` | How many unparsed documents to parse. `None` means all pending. |
+
+```python
+from src.cases.parse import CaseRawParser
+
+# All fetched, unparsed
+CaseRawParser().run(max_documents=None)
+
+# Smoke test
+CaseRawParser().run(max_documents=16)
+```
+
+### `CaseDocumentParser.parse_pending`
+
+Same work as `run`, on an existing repository. Returns how many documents were parsed.
+
+| Argument | Type | Description |
+|---|---|---|
+| `max_documents` | `int \| None` | How many unparsed documents to parse. `None` means all pending. |
+
+Needs a `RawCaseRepository`.
+
+```python
+parsed = CaseDocumentParser(repository).parse_pending(max_documents=80)
+```
+
+---
+
+## Case promote entry points
+
+These read `raw_source` and write `knowledge_base`. Only `parse_status=complete` and not yet `promoted` documents are promoted. Paragraphs are re-extracted from HTML. A successful promote sets `promoted=true`.
+
+`CaseRawPromoter.run` is the usual entry. Use `CasePromoter.promote_pending` when you already have sessions.
+
+### `CaseRawPromoter.run`
+
+Promote complete raw cases into `courts`, `cases`, `paragraphs`, `judges`, `parties`, and `counsels`.
+
+| Argument | Type | Description |
+|---|---|---|
+| `max_cases` | `int \| None` | How many complete cases to promote. `None` means all pending. |
+
+```python
+from src.cases.promote import CaseRawPromoter
+
+# All complete, not yet in the knowledge base
+CaseRawPromoter().run(max_cases=None)
+
+# Smoke test
+CaseRawPromoter().run(max_cases=16)
+```
+
+### `CasePromoter.promote_pending`
+
+Same work as `run`, on existing repositories. Returns how many cases were inserted.
+
+| Argument | Type | Description |
+|---|---|---|
+| `max_cases` | `int \| None` | How many complete cases to promote. `None` means all pending. |
+
+Needs a `RawCaseRepository`, a `KnowledgeCaseRepository`, and a `CaseDocumentParser`.
+
+```python
+promoted = CasePromoter(raw_repository, knowledge_repository, parser).promote_pending(
+    max_cases=80
+)
+```
 
 ---
 
@@ -91,6 +245,7 @@ One LawNet snapshot per case. Re-fetch overwrites this row.
 | `expected_paragraph_count` | integer, nullable | Numbered layouts only: the max paragraph number. `NULL` when the layout has no numbers. |
 | `extracted_paragraph_count` | integer, nullable | Paragraphs the parser produced. |
 | `needs_review` | boolean | Unknown layout or incomplete parse. |
+| `promoted` | boolean | `true` after the document is written to the knowledge base. |
 
 ### Raw source acts
 
@@ -282,7 +437,7 @@ One tree of provisions per act version or per subsidiary legislation. Exactly on
 
 ### Paragraphs
 
-Numbered (or ordered) units of a judgment. Classification and references attach here.
+Ordered units of a judgment. Classification and references attach here.
 
 | Column | Type | Description |
 |---|---|---|
@@ -291,7 +446,6 @@ Numbered (or ordered) units of a judgment. Classification and references attach 
 | `functional_role_id` | integer, nullable | FK → `functional_roles`. Classification. |
 | `uri` | string, unique | Stable paragraph URI. |
 | `ordinal` | integer | Order in the judgment. |
-| `number` | string, nullable | Printed number when the layout has one (`1`, `12`). |
 | `content` | text | Paragraph text. |
 | `embedding` | vector(1536), nullable | Embedding of the paragraph text. |
 

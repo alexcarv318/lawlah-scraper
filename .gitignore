@@ -20,3 +20,4 @@ wheels/
 .DS_Store
 
 *code-workspace
+scratch.py

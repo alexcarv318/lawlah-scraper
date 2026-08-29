@@ -15,6 +15,5 @@ class Paragraph(KnowledgeBase):
     functional_role_id: Mapped[int | None] = mapped_column(ForeignKey("functional_roles.id", ondelete="SET NULL"))
     uri: Mapped[str] = mapped_column(String, unique=True)
     ordinal: Mapped[int] = mapped_column(Integer)
-    number: Mapped[str | None] = mapped_column(String)
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIMENSIONS))

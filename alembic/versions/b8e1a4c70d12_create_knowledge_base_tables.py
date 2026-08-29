@@ -297,7 +297,6 @@ def upgrade() -> None:
         sa.Column("functional_role_id", sa.Integer(), nullable=True),
         sa.Column("uri", sa.String(), nullable=False),
         sa.Column("ordinal", sa.Integer(), nullable=False),
-        sa.Column("number", sa.String(), nullable=True),
         sa.Column("content", sa.Text(), nullable=False),
         sa.Column("embedding", Vector(1536), nullable=True),
         sa.ForeignKeyConstraint(

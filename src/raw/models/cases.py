@@ -96,3 +96,4 @@ class RawCaseDocument(RawSourceBase):
     expected_paragraph_count: Mapped[int | None] = mapped_column(Integer)
     extracted_paragraph_count: Mapped[int | None] = mapped_column(Integer)
     needs_review: Mapped[bool]
+    promoted: Mapped[bool]
