@@ -18,6 +18,7 @@ class ProvisionKind(StrEnum):
     PROVISO = "proviso"
     POINT = "point"
     OPENING = "opening"
+    SCHEDULE = "schedule"
 
 
 class Provision(KnowledgeBase):
@@ -53,6 +54,7 @@ class Provision(KnowledgeBase):
     citation: Mapped[str | None] = mapped_column(String)
     heading: Mapped[str | None] = mapped_column(String)
     content: Mapped[str | None] = mapped_column(Text)
+    amendment_note: Mapped[str | None] = mapped_column(Text)
     descendant_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIMENSIONS))
 

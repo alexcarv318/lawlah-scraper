@@ -2,6 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote_plus
 
+from playwright.sync_api import ProxySettings
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -18,6 +19,11 @@ class Settings(BaseSettings):
     raw_source_database: str = "raw_source"
     knowledge_base_database: str = "knowledge_base"
 
+    proxy_dns: str | None = None
+    proxy_port: int | None = None
+    proxy_username: str | None = None
+    proxy_password: str | None = None
+
     @property
     def raw_source_database_url(self) -> str:
         return self.build_database_url(self.raw_source_database)
@@ -32,6 +38,21 @@ class Settings(BaseSettings):
             f"postgresql+psycopg://{self.postgres_user}:{password}"
             f"@{self.postgres_host}:{self.postgres_port}/{database_name}"
         )
+
+    def playwright_proxy(self) -> ProxySettings | None:
+        if (
+            not self.proxy_dns
+            or self.proxy_port is None
+            or not self.proxy_username
+            or not self.proxy_password
+        ):
+            return None
+
+        return {
+            "server": f"http://{self.proxy_dns}:{self.proxy_port}",
+            "username": self.proxy_username,
+            "password": self.proxy_password,
+        }
 
 
 @lru_cache

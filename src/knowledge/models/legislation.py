@@ -1,6 +1,15 @@
 from datetime import date
 
-from sqlalchemy import Boolean, Date, ForeignKey, Index, String, UniqueConstraint, text
+from sqlalchemy import (
+    Boolean,
+    Date,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.database import KnowledgeBase
@@ -43,3 +52,16 @@ class SubsidiaryLegislation(KnowledgeBase):
     title: Mapped[str] = mapped_column(String)
     number: Mapped[str] = mapped_column(String)
     date: Mapped[date] = mapped_column(Date)
+
+
+class LegislativeDefinition(KnowledgeBase):
+    __tablename__ = "legislative_definitions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    act_id: Mapped[int] = mapped_column(ForeignKey("acts.id", ondelete="CASCADE"), index=True)
+    term: Mapped[str] = mapped_column(String)
+    definition: Mapped[str] = mapped_column(Text)
+
+    __table_args__ = (
+        UniqueConstraint("act_id", "term", name="uq_legislative_definitions_act_id_term"),
+    )

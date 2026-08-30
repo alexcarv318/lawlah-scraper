@@ -13,7 +13,7 @@ Two Postgres databases on one instance:
 | `raw_source` | Landing zone. Source-shaped: URL, HTML, LawNet JSON, parse status. |
 | `knowledge_base` | Serving graph. Cases, legislation, provisions, paragraphs, taxonomy, aliases, references. |
 
-LawNet is the only case source. Acts have versions. Cases and subsidiary legislation do not.
+LawNet is the only case source. Acts and subsidiary legislation have versions. Cases do not. The knowledge base still stores one current SL row until we promote SL versions.
 
 ---
 
@@ -22,6 +22,7 @@ LawNet is the only case source. Acts have versions. Cases and subsidiary legisla
 - [Case scrape entry points](#case-scrape-entry-points)
 - [Case parse entry points](#case-parse-entry-points)
 - [Case promote entry points](#case-promote-entry-points)
+- [Legislation scrape entry points](#legislation-scrape-entry-points)
 - [Raw source](#raw-source)
   - [Cases](#raw-source-cases)
     - [raw_cases](#raw_cases)
@@ -29,6 +30,9 @@ LawNet is the only case source. Acts have versions. Cases and subsidiary legisla
   - [Acts](#raw-source-acts)
     - [raw_acts](#raw_acts)
     - [raw_act_versions](#raw_act_versions)
+  - [Subsidiary legislation](#raw-source-subsidiary-legislation)
+    - [raw_subsidiary_legislations](#raw_subsidiary_legislations)
+    - [raw_subsidiary_legislation_versions](#raw_subsidiary_legislation_versions)
 - [Knowledge base](#knowledge-base)
   - [Cases](#cases)
     - [courts](#courts)
@@ -43,6 +47,7 @@ LawNet is the only case source. Acts have versions. Cases and subsidiary legisla
     - [acts](#acts)
     - [act_versions](#act_versions)
     - [subsidiary_legislations](#subsidiary_legislations)
+    - [legislative_definitions](#legislative_definitions)
   - [Provisions](#provisions)
   - [Paragraphs](#paragraphs)
   - [Taxonomy](#taxonomy)
@@ -206,11 +211,64 @@ promoted = CasePromoter(raw_repository, knowledge_repository, parser).promote_pe
 
 ---
 
+## Legislation scrape entry points
+
+These write to `raw_source` only. They do not parse provisions or promote to the knowledge base.
+
+Needs Chromium: `uv run playwright install chromium`.
+
+`LegislationRawScraper.run` is the usual entry. It discovers current acts, walks each timeline, then fetches pending versions. It does **not** scrape subsidiary legislation.
+
+`LegislationRawScraper.scrape_subsidiary_legislation` is for later. It only reads the SL tab of **acts already in `raw_acts`**. It does not browse the global SL catalog.
+
+### `LegislationRawScraper.run`
+
+Browse current acts, insert missing `raw_acts` / `raw_act_versions`, then fetch HTML that is still pending.
+
+| Argument | Type | Description |
+|---|---|---|
+| `max_acts` | `int \| None` | How many browse rows / acts to process. `None` means the full current list. |
+| `max_versions` | `int \| None` | How many pending act versions to fetch. `None` means all pending. |
+
+```python
+from src.legislation.scrape import LegislationRawScraper
+
+# Full current acts and every timeline version
+LegislationRawScraper().run(max_acts=None, max_versions=None)
+
+# Smoke test
+LegislationRawScraper().run(max_acts=1, max_versions=3)
+```
+
+### `LegislationRawScraper.scrape_subsidiary_legislation`
+
+For each stored act, list that act's subsidiary legislation, walk those timelines, then fetch pending SL versions.
+
+| Argument | Type | Description |
+|---|---|---|
+| `max_acts` | `int \| None` | How many stored acts to take SL from. `None` means every stored act. |
+| `max_versions` | `int \| None` | How many pending SL versions to fetch. `None` means all pending for those acts. |
+
+```python
+from src.legislation.scrape import LegislationRawScraper
+
+LegislationRawScraper().scrape_subsidiary_legislation(
+    max_acts=None,
+    max_versions=None,
+)
+```
+
+`?WholeDoc=1` tells SSO to load the whole document via `/Details/GetLazyLoadContent`. Fetch uses Playwright, scrolls to trigger those requests, and is done when every TOC `#pr*` / `#Sc*` id is on the page. If content stops growing, the current HTML is saved and marked `needs_review`. Each version is committed as soon as it is fetched.
+
+SSO Playwright uses `PROXY_DNS`, `PROXY_PORT`, `PROXY_USERNAME`, and `PROXY_PASSWORD` from `.env` when they are set. LawNet does not.
+
+---
+
 ## Raw source
 
 Work items and fetched HTML. Not a second copy of the knowledge-base graph.
 
-Search creates a `raw_cases` row. The document API fills `raw_case_documents`. Browse creates a `raw_acts` row. Each timeline date fills `raw_act_versions`. Promote only when `parse_status` is `complete`.
+Search creates a `raw_cases` row. The document API fills `raw_case_documents`. Browse creates a `raw_acts` row. Each timeline date fills `raw_act_versions`. Each act's SL list fills `raw_subsidiary_legislations`, and each SL timeline date fills `raw_subsidiary_legislation_versions`. Promote only when `parse_status` is `complete`.
 
 ### Raw source cases
 
@@ -263,7 +321,7 @@ One row per current act from the SSO browse list. The work item. Slug is the pat
 
 ### raw_act_versions
 
-One snapshot per timeline date. Unique on `(raw_act_id, valid_from)`. `html` is the assembled `#legisContent` after lazy-load, not the first-page stub. An act is complete when every timeline date has a complete version.
+One snapshot per timeline date. Unique on `(raw_act_id, valid_from)`. `html` is `#legisContent` after `WholeDoc=1` lazy-load finishes. An act is complete when every timeline date has a complete version.
 
 | Column | Type | Description |
 |---|---|---|
@@ -273,14 +331,51 @@ One snapshot per timeline date. Unique on `(raw_act_id, valid_from)`. `html` is 
 | `is_current` | boolean | The version in force now. |
 | `source_url` | text | Current URL or `/Act/AA2004/Historical/20241209?…`. |
 | `http_status` | integer, nullable | HTTP status of the fetch. |
-| `fetch_status` | string | `success` / `not_found` / `error`. |
+| `fetch_status` | string | `not_fetched` / `success` / `not_found` / `error`. |
 | `fetch_error` | text, nullable | Error message when the fetch fails. |
 | `html` | text, nullable | Full act HTML after lazy-load. |
-| `source_metadata` | jsonb, nullable | SSO `global-vars` / that timeline item. |
+| `source_metadata` | jsonb, nullable | TOC vs assembled section/schedule counts. |
 | `parse_status` | string | `not_parsed` / `complete` / `incomplete` / `unknown_layout` / `failed`. |
-| `expected_provision_count` | integer, nullable | TOC / fragment count. |
-| `extracted_provision_count` | integer, nullable | `div.prov1` the parser produced. |
-| `needs_review` | boolean | Incomplete parse or stub HTML. |
+| `expected_provision_count` | integer, nullable | TOC `#pr*` plus `#Sc*` count. |
+| `extracted_provision_count` | integer, nullable | Assembled `div.prov1` plus `div.schedule`. |
+| `needs_review` | boolean | Stub HTML, count mismatch, or later incomplete parse. |
+
+### Raw source subsidiary legislation
+
+### raw_subsidiary_legislations
+
+One row per current SL instrument listed under a stored act. The work item. Slug is the path id (`AA2004-R1`). Always discovered from that act's SL tab, never from the global SL catalog.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `raw_act_id` | integer | FK → `raw_acts`. The authorising act whose SL tab listed this instrument. |
+| `slug` | string, unique | Current path id, e.g. `AA2004-R1`. Historical URLs can use an older slug; that lives on the version row. |
+| `title` | string | Title from the SL list. |
+| `number` | string | SL number, e.g. `Cap. 2, R 1` or `S 946/2024`. |
+| `source_url` | text | Current instrument URL. |
+| `status` | string | `discovered` / `fetch_failed` / `parse_incomplete` / `complete` / `needs_review`. |
+
+### raw_subsidiary_legislation_versions
+
+One snapshot per SL timeline date. Unique on `(raw_subsidiary_legislation_id, valid_from)`. Same fetch rules as act versions. Not populated until `scrape_subsidiary_legislation`.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `raw_subsidiary_legislation_id` | integer | FK → `raw_subsidiary_legislations`. |
+| `valid_from` | date | Version date from the timeline (`ValidDate`). |
+| `is_current` | boolean | The version in force now. |
+| `source_url` | text | Current URL or `/SL/…/Historical/…`. |
+| `http_status` | integer, nullable | HTTP status of the fetch. |
+| `fetch_status` | string | `not_fetched` / `success` / `not_found` / `error`. |
+| `fetch_error` | text, nullable | Error message when the fetch fails. |
+| `html` | text, nullable | Full SL HTML after lazy-load. |
+| `source_metadata` | jsonb, nullable | TOC vs assembled section/schedule counts. |
+| `parse_status` | string | `not_parsed` / `complete` / `incomplete` / `unknown_layout` / `failed`. |
+| `expected_provision_count` | integer, nullable | TOC `#pr*` plus `#Sc*` count. |
+| `extracted_provision_count` | integer, nullable | Assembled `div.prov1` plus `div.schedule`. |
+| `needs_review` | boolean | Stub HTML, count mismatch, or later incomplete parse. |
 
 ---
 
@@ -371,7 +466,7 @@ Counsel as people, unique on `name`. LawNet sends appearance lines (`Cavinder Bu
 
 ### Legislation
 
-Versions exist only for acts. Subsidiary legislation is a single current document.
+Versions exist on SSO for acts and for SL. The knowledge base still has one current SL document. Raw already stores SL versions for when we promote them.
 
 #### acts
 
@@ -408,6 +503,19 @@ Rules, regulations, orders. No version history.
 | `number` | string | SL number, e.g. `S 123/2020`. |
 | `date` | date | Date of the instrument. |
 
+#### legislative_definitions
+
+Current-act glossary only. Rewritten when the current version is promoted. One row per term on an act.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | integer | Primary key. |
+| `act_id` | integer | FK → `acts`. |
+| `term` | string | Unquoted term, e.g. `accounting corporation`. |
+| `definition` | text | The predicate, including `means` / `includes` / `has the meaning given by`. |
+
+Unique on `(act_id, term)`.
+
 ---
 
 ### Provisions
@@ -424,12 +532,13 @@ One tree of provisions per act version or per subsidiary legislation. Exactly on
 | `parent_id` | integer, nullable | FK → `provisions`. Parent node in the same tree. |
 | `functional_role_id` | integer, nullable | FK → `functional_roles`. Classification. |
 | `uri` | string, unique | Stable provision URI. |
-| `kind` | string | `part` / `division` / `subdivision` / `section` / `subsection` / `proviso` / `point` / `opening`. |
+| `kind` | string | `part` / `division` / `subdivision` / `section` / `subsection` / `proviso` / `point` / `opening` / `schedule`. |
 | `ordinal` | integer | Nested-set left position in the document. |
 | `level` | integer | Depth in the tree. |
 | `citation` | string, nullable | Pinpoint, e.g. `s 12(1)`. |
 | `heading` | string, nullable | Heading text. |
-| `content` | text, nullable | Body text. |
+| `content` | text, nullable | Body text, without amendment chrome. |
+| `amendment_note` | text, nullable | SSO `amendNote` text, e.g. `[Act 24 of 2025 wef 06/05/2026]`. |
 | `descendant_count` | integer | Size of the subtree, for outline slices. |
 | `embedding` | vector(1536), nullable | Embedding of the provision text. |
 

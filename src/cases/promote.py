@@ -1,7 +1,7 @@
 import re
 
+from src.cases.client import LawNetClient
 from src.cases.parse import CaseDocumentParser
-from src.cases.scrape import LawNetClient
 from src.database import get_knowledge_base_session_maker, get_raw_source_session_maker
 from src.knowledge.repository import KnowledgeCaseRepository
 from src.logger import get_logger

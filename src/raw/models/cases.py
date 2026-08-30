@@ -17,6 +17,7 @@ class RawCaseStatus(StrEnum):
 
 
 class FetchStatus(StrEnum):
+    NOT_FETCHED = "not_fetched"
     SUCCESS = "success"
     NOT_FOUND = "not_found"
     ERROR = "error"
