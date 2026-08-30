@@ -1,10 +1,11 @@
+from collections.abc import Sequence
 from datetime import date
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.cases.schema import DocumentFetch, DocumentParse
-from src.legislation.schema import LegislationFetch
+from src.legislation.schema import LegislationFetch, LegislationParse
 from src.raw.models.cases import (
     FetchStatus,
     ParseStatus,
@@ -212,6 +213,7 @@ class RawLegislationRepository:
                 expected_provision_count=None,
                 extracted_provision_count=None,
                 needs_review=False,
+                promoted=False,
             )
         )
 
@@ -319,6 +321,7 @@ class RawLegislationRepository:
                 expected_provision_count=None,
                 extracted_provision_count=None,
                 needs_review=False,
+                promoted=False,
             )
         )
 
@@ -388,6 +391,7 @@ class RawLegislationRepository:
             result.fetch_status != FetchStatus.SUCCESS
             or result.expected_provision_count != result.extracted_provision_count
         )
+        version.promoted = False
 
     @staticmethod
     def apply_parent_status(
@@ -399,3 +403,152 @@ class RawLegislationRepository:
             return
         if result.expected_provision_count != result.extracted_provision_count:
             parent.status = RawLegislationStatus.NEEDS_REVIEW
+
+    def get_act_versions_pending_parse(self, limit: int | None) -> list[tuple[RawAct, RawActVersion]]:
+        stmt = (
+            select(RawAct, RawActVersion)
+            .join(RawActVersion, RawActVersion.raw_act_id == RawAct.id)
+            .where(
+                RawActVersion.fetch_status == FetchStatus.SUCCESS,
+                RawActVersion.parse_status == ParseStatus.NOT_PARSED,
+                RawActVersion.html.is_not(None),
+            )
+            .order_by(RawActVersion.is_current.desc(), RawActVersion.valid_from.desc())
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return list(self.session.execute(stmt).tuples())
+
+    def save_act_version_parse(
+        self,
+        act: RawAct,
+        version: RawActVersion,
+        result: LegislationParse,
+    ) -> None:
+        version.parse_status = result.parse_status
+        version.expected_provision_count = result.expected_provision_count
+        version.extracted_provision_count = result.extracted_provision_count
+        version.needs_review = result.needs_review
+        self.refresh_act_status(act)
+
+    def get_act_versions_pending_promote(
+        self,
+        limit: int | None,
+    ) -> list[tuple[RawAct, RawActVersion]]:
+        stmt = (
+            select(RawAct, RawActVersion)
+            .join(RawActVersion, RawActVersion.raw_act_id == RawAct.id)
+            .where(
+                RawActVersion.parse_status == ParseStatus.COMPLETE,
+                RawActVersion.promoted.is_(False),
+                RawActVersion.html.is_not(None),
+            )
+            .order_by(RawActVersion.is_current.desc(), RawActVersion.valid_from.desc())
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return list(self.session.execute(stmt).tuples())
+
+    @staticmethod
+    def mark_act_version_promoted(version: RawActVersion) -> None:
+        version.promoted = True
+
+    def get_subsidiary_versions_pending_parse(
+        self,
+        limit: int | None,
+    ) -> list[tuple[RawSubsidiaryLegislation, RawSubsidiaryLegislationVersion]]:
+        stmt = (
+            select(RawSubsidiaryLegislation, RawSubsidiaryLegislationVersion)
+            .join(
+                RawSubsidiaryLegislationVersion,
+                RawSubsidiaryLegislationVersion.raw_subsidiary_legislation_id
+                == RawSubsidiaryLegislation.id,
+            )
+            .where(
+                RawSubsidiaryLegislationVersion.fetch_status == FetchStatus.SUCCESS,
+                RawSubsidiaryLegislationVersion.parse_status == ParseStatus.NOT_PARSED,
+                RawSubsidiaryLegislationVersion.html.is_not(None),
+            )
+            .order_by(
+                RawSubsidiaryLegislationVersion.is_current.desc(),
+                RawSubsidiaryLegislationVersion.valid_from.desc(),
+            )
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return list(self.session.execute(stmt).tuples())
+
+    def save_subsidiary_version_parse(
+        self,
+        instrument: RawSubsidiaryLegislation,
+        version: RawSubsidiaryLegislationVersion,
+        result: LegislationParse,
+    ) -> None:
+        version.parse_status = result.parse_status
+        version.expected_provision_count = result.expected_provision_count
+        version.extracted_provision_count = result.extracted_provision_count
+        version.needs_review = result.needs_review
+        self.refresh_subsidiary_status(instrument)
+
+    def get_subsidiary_versions_pending_promote(
+        self,
+        limit: int | None,
+    ) -> list[tuple[RawAct, RawSubsidiaryLegislation, RawSubsidiaryLegislationVersion]]:
+        stmt = (
+            select(RawAct, RawSubsidiaryLegislation, RawSubsidiaryLegislationVersion)
+            .join(
+                RawSubsidiaryLegislation,
+                RawSubsidiaryLegislation.raw_act_id == RawAct.id,
+            )
+            .join(
+                RawSubsidiaryLegislationVersion,
+                RawSubsidiaryLegislationVersion.raw_subsidiary_legislation_id
+                == RawSubsidiaryLegislation.id,
+            )
+            .where(
+                RawSubsidiaryLegislationVersion.parse_status == ParseStatus.COMPLETE,
+                RawSubsidiaryLegislationVersion.promoted.is_(False),
+                RawSubsidiaryLegislationVersion.is_current.is_(True),
+                RawSubsidiaryLegislationVersion.html.is_not(None),
+            )
+            .order_by(RawSubsidiaryLegislation.slug)
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return list(self.session.execute(stmt).tuples())
+
+    @staticmethod
+    def mark_subsidiary_version_promoted(version: RawSubsidiaryLegislationVersion) -> None:
+        version.promoted = True
+
+    def refresh_act_status(self, act: RawAct) -> None:
+        stmt = select(RawActVersion).where(RawActVersion.raw_act_id == act.id)
+        found = self.session.scalars(stmt)
+        act.status = RawLegislationRepository.parent_status_from_versions(list(found))
+
+    def refresh_subsidiary_status(self, instrument: RawSubsidiaryLegislation) -> None:
+        stmt = select(RawSubsidiaryLegislationVersion).where(
+            RawSubsidiaryLegislationVersion.raw_subsidiary_legislation_id == instrument.id
+        )
+        found = self.session.scalars(stmt)
+        instrument.status = RawLegislationRepository.parent_status_from_versions(list(found))
+
+    @staticmethod
+    def parent_status_from_versions(
+        versions: Sequence[RawActVersion | RawSubsidiaryLegislationVersion],
+    ) -> RawLegislationStatus:
+        if not versions:
+            return RawLegislationStatus.DISCOVERED
+
+        statuses = [version.parse_status for version in versions]
+        fetch_failed = any(version.fetch_status != FetchStatus.SUCCESS for version in versions)
+
+        if any(status == ParseStatus.NOT_PARSED for status in statuses):
+            if fetch_failed:
+                return RawLegislationStatus.FETCH_FAILED
+            return RawLegislationStatus.DISCOVERED
+        if any(status == ParseStatus.INCOMPLETE for status in statuses):
+            return RawLegislationStatus.PARSE_INCOMPLETE
+        if all(status == ParseStatus.COMPLETE for status in statuses):
+            return RawLegislationStatus.COMPLETE
+        return RawLegislationStatus.NEEDS_REVIEW

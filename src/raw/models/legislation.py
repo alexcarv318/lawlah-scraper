@@ -79,6 +79,7 @@ class RawActVersion(RawSourceBase):
     expected_provision_count: Mapped[int | None] = mapped_column(Integer)
     extracted_provision_count: Mapped[int | None] = mapped_column(Integer)
     needs_review: Mapped[bool]
+    promoted: Mapped[bool]
 
     __table_args__ = (
         UniqueConstraint("raw_act_id", "valid_from", name="uq_raw_act_versions_raw_act_id_valid_from"),
@@ -141,6 +142,7 @@ class RawSubsidiaryLegislationVersion(RawSourceBase):
     expected_provision_count: Mapped[int | None] = mapped_column(Integer)
     extracted_provision_count: Mapped[int | None] = mapped_column(Integer)
     needs_review: Mapped[bool]
+    promoted: Mapped[bool]
 
     __table_args__ = (
         UniqueConstraint(

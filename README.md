@@ -23,6 +23,8 @@ LawNet is the only case source. Acts and subsidiary legislation have versions. C
 - [Case parse entry points](#case-parse-entry-points)
 - [Case promote entry points](#case-promote-entry-points)
 - [Legislation scrape entry points](#legislation-scrape-entry-points)
+- [Legislation parse entry points](#legislation-parse-entry-points)
+- [Legislation promote entry points](#legislation-promote-entry-points)
 - [Raw source](#raw-source)
   - [Cases](#raw-source-cases)
     - [raw_cases](#raw_cases)
@@ -264,6 +266,92 @@ SSO Playwright uses `PROXY_DNS`, `PROXY_PORT`, `PROXY_USERNAME`, and `PROXY_PASS
 
 ---
 
+## Legislation parse entry points
+
+These write to `raw_source` only. They do not store the provision tree or promote to the knowledge base.
+
+`LegislationRawParser.run` is the usual entry. It parses fetched act versions that are still `not_parsed`, then the same for subsidiary legislation versions. Use `LegislationDocumentParser.parse_pending` when you already have a session.
+
+Complete means every TOC section and schedule (`div.prov1`, `div.prov1Rep`, `div.schedule`) became a tree node. Definitions are read from `td.def` and only used when the current version is promoted.
+
+### `LegislationRawParser.run`
+
+Parse successful legislation versions that are still `not_parsed`. Writes `parse_status`, TOC counts, and `needs_review` on the version row. An act is `complete` when every one of its versions is.
+
+| Argument | Type | Description |
+|---|---|---|
+| `max_versions` | `int \| None` | How many unparsed versions to parse in each pass. `None` means all pending. |
+
+```python
+from src.legislation.parse import LegislationRawParser
+
+# All fetched, unparsed
+LegislationRawParser().run(max_versions=None)
+
+# Smoke test
+LegislationRawParser().run(max_versions=8)
+```
+
+### `LegislationDocumentParser.parse_pending`
+
+Same work as `run` for act versions, on an existing repository. Returns how many versions were parsed.
+
+| Argument | Type | Description |
+|---|---|---|
+| `max_versions` | `int \| None` | How many unparsed versions to parse. `None` means all pending. |
+
+Needs a `RawLegislationRepository`.
+
+```python
+parsed = LegislationDocumentParser(repository).parse_pending(max_versions=8)
+```
+
+---
+
+## Legislation promote entry points
+
+These read `raw_source` and write `knowledge_base`. Only `parse_status=complete` and not yet `promoted` versions are promoted. The provision tree is re-extracted from HTML. A successful promote sets `promoted=true`.
+
+`LegislationRawPromoter.run` is the usual entry. Use `LegislationPromoter.promote_pending` when you already have sessions.
+
+Act versions write `acts`, `act_versions`, and `provisions`. The current version also rewrites `legislative_definitions`. Embeddings stay empty here; they are for current full sections later.
+
+Subsidiary legislation promote writes the current instrument only. Historical SL versions stay in `raw_source` until the knowledge base grows SL versions.
+
+### `LegislationRawPromoter.run`
+
+| Argument | Type | Description |
+|---|---|---|
+| `max_versions` | `int \| None` | How many complete versions to promote in each pass. `None` means all pending. |
+
+```python
+from src.legislation.promote import LegislationRawPromoter
+
+# All complete, not yet in the knowledge base
+LegislationRawPromoter().run(max_versions=None)
+
+# Smoke test
+LegislationRawPromoter().run(max_versions=8)
+```
+
+### `LegislationPromoter.promote_pending`
+
+Same work as `run` for act versions, on existing repositories. Returns how many versions were inserted.
+
+| Argument | Type | Description |
+|---|---|---|
+| `max_versions` | `int \| None` | How many complete versions to promote. `None` means all pending. |
+
+Needs a `RawLegislationRepository`, a `KnowledgeLegislationRepository`, and a `LegislationDocumentParser`.
+
+```python
+promoted = LegislationPromoter(raw_repository, knowledge_repository, parser).promote_pending(
+    max_versions=8
+)
+```
+
+---
+
 ## Raw source
 
 Work items and fetched HTML. Not a second copy of the knowledge-base graph.
@@ -339,6 +427,7 @@ One snapshot per timeline date. Unique on `(raw_act_id, valid_from)`. `html` is 
 | `expected_provision_count` | integer, nullable | TOC `#pr*` plus `#Sc*` count. |
 | `extracted_provision_count` | integer, nullable | Assembled `div.prov1` plus `div.schedule`. |
 | `needs_review` | boolean | Stub HTML, count mismatch, or later incomplete parse. |
+| `promoted` | boolean | `true` after this version is written to the knowledge base. |
 
 ### Raw source subsidiary legislation
 
@@ -376,6 +465,7 @@ One snapshot per SL timeline date. Unique on `(raw_subsidiary_legislation_id, va
 | `expected_provision_count` | integer, nullable | TOC `#pr*` plus `#Sc*` count. |
 | `extracted_provision_count` | integer, nullable | Assembled `div.prov1` plus `div.schedule`. |
 | `needs_review` | boolean | Stub HTML, count mismatch, or later incomplete parse. |
+| `promoted` | boolean | `true` after the current instrument is written to the knowledge base. |
 
 ---
 

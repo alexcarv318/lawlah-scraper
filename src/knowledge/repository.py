@@ -1,6 +1,6 @@
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from src.knowledge.models.cases import (
@@ -13,8 +13,16 @@ from src.knowledge.models.cases import (
     Judge,
     Party,
 )
+from src.knowledge.models.legislation import (
+    Act,
+    ActVersion,
+    LegislativeDefinition,
+    SubsidiaryLegislation,
+)
 from src.knowledge.models.paragraphs import Paragraph
+from src.knowledge.models.provisions import Provision
 from src.knowledge.models.taxonomy import FunctionalRole  # noqa: F401
+from src.legislation.schema import ExtractedDefinition, FlattenedProvision
 
 
 class KnowledgeCaseRepository:
@@ -114,3 +122,134 @@ class KnowledgeCaseRepository:
             existing,
             CaseCounsel(case_id=case_id, counsel_id=counsel_id, represents=represents),
         )
+
+
+class KnowledgeLegislationRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def persist[T](self, row: T) -> T:
+        self.session.add(row)
+        self.session.flush()
+        return row
+
+    def get_existing_act_version_uris(self, uris: list[str]) -> set[str]:
+        if not uris:
+            return set()
+        stmt = select(ActVersion.uri).where(ActVersion.uri.in_(uris))
+        found = self.session.scalars(stmt)
+        return set(found)
+
+    def get_existing_subsidiary_uris(self, uris: list[str]) -> set[str]:
+        if not uris:
+            return set()
+        stmt = select(SubsidiaryLegislation.uri).where(SubsidiaryLegislation.uri.in_(uris))
+        found = self.session.scalars(stmt)
+        return set(found)
+
+    def get_or_create_act(self, uri: str, title: str) -> Act:
+        act = self.session.scalar(select(Act).where(Act.uri == uri))
+        return act if act is not None else self.persist(Act(uri=uri, title=title))
+
+    def add_act_version(
+        self,
+        act_id: int,
+        uri: str,
+        valid_from: date,
+        is_current: bool,
+    ) -> ActVersion:
+        if is_current:
+            current = self.session.scalar(
+                select(ActVersion).where(
+                    ActVersion.act_id == act_id,
+                    ActVersion.is_current.is_(True),
+                )
+            )
+            if current is not None:
+                current.is_current = False
+
+        return self.persist(
+            ActVersion(
+                act_id=act_id,
+                uri=uri,
+                valid_from=valid_from,
+                is_current=is_current,
+            )
+        )
+
+    def add_subsidiary_legislation(
+        self,
+        act_id: int | None,
+        uri: str,
+        title: str,
+        number: str,
+        instrument_date: date,
+    ) -> SubsidiaryLegislation:
+        return self.persist(
+            SubsidiaryLegislation(
+                act_id=act_id,
+                uri=uri,
+                title=title,
+                number=number,
+                date=instrument_date,
+            )
+        )
+
+    def add_provisions(
+        self,
+        document_uri: str,
+        provisions: list[FlattenedProvision],
+        act_version_id: int | None = None,
+        subsidiary_legislation_id: int | None = None,
+    ) -> None:
+        row_ids: list[int] = []
+        used_uris: set[str] = set()
+
+        for provision in provisions:
+            parent_id = (
+                row_ids[provision.parent_index]
+                if provision.parent_index is not None
+                else None
+            )
+            anchor = provision.anchor or f"n{provision.ordinal}"
+            uri = f"{document_uri}#{anchor}"
+            if uri in used_uris:
+                uri = f"{document_uri}#{anchor}-{provision.ordinal}"
+            used_uris.add(uri)
+
+            row = self.persist(
+                Provision(
+                    act_version_id=act_version_id,
+                    subsidiary_legislation_id=subsidiary_legislation_id,
+                    parent_id=parent_id,
+                    functional_role_id=None,
+                    uri=uri,
+                    kind=provision.kind,
+                    ordinal=provision.ordinal,
+                    level=provision.level,
+                    citation=provision.citation,
+                    heading=provision.heading,
+                    content=provision.content,
+                    amendment_note=provision.amendment_note,
+                    descendant_count=provision.descendant_count,
+                    embedding=None,
+                )
+            )
+            row_ids.append(row.id)
+
+    def replace_definitions(self, act_id: int, definitions: list[ExtractedDefinition]) -> None:
+        stmt = delete(LegislativeDefinition).where(LegislativeDefinition.act_id == act_id)
+        self.session.execute(stmt)
+
+        seen: set[str] = set()
+        for item in definitions:
+            if item.term in seen:
+                continue
+            seen.add(item.term)
+            self.session.add(
+                LegislativeDefinition(
+                    act_id=act_id,
+                    term=item.term,
+                    definition=item.definition,
+                )
+            )
