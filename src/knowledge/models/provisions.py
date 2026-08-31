@@ -56,6 +56,7 @@ class Provision(KnowledgeBase):
     content: Mapped[str | None] = mapped_column(Text)
     amendment_note: Mapped[str | None] = mapped_column(Text)
     descendant_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    embedding_text: Mapped[str | None] = mapped_column(Text)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIMENSIONS))
 
     __table_args__ = (

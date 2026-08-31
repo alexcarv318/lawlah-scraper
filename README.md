@@ -25,6 +25,7 @@ LawNet is the only case source. Acts and subsidiary legislation have versions. C
 - [Legislation scrape entry points](#legislation-scrape-entry-points)
 - [Legislation parse entry points](#legislation-parse-entry-points)
 - [Legislation promote entry points](#legislation-promote-entry-points)
+- [Embedding entry points](#embedding-entry-points)
 - [Raw source](#raw-source)
   - [Cases](#raw-source-cases)
     - [raw_cases](#raw_cases)
@@ -352,6 +353,33 @@ promoted = LegislationPromoter(raw_repository, knowledge_repository, parser).pro
 
 ---
 
+## Embedding entry points
+
+These write vectors onto `knowledge_base` rows that are still `embedding IS NULL`. They do not scrape, parse, or classify.
+
+Needs `OPENAI_API_KEY`. The model is `text-embedding-3-small` (1536), the same one the product uses for the query.
+
+`KnowledgeEmbedder.run` is the usual entry. Paragraphs use `content` as-is. Current full sections use the section plus its descendants, in `ordinal` order. That composed string is stored on `provisions.embedding_text`. If it is over 8000 tokens, the section is left empty and each direct child is tried the same way.
+
+### `KnowledgeEmbedder.run`
+
+| Argument | Type | Description |
+|---|---|---|
+| `max_paragraphs` | `int \| None` | How many paragraphs without a vector to embed. `None` means all pending. |
+| `max_provisions` | `int \| None` | How many provision units without a vector to embed. `None` means all pending. |
+
+```python
+from src.embeddings.embed import KnowledgeEmbedder
+
+# All pending paragraphs and current-section units
+KnowledgeEmbedder().run()
+
+# Smoke test
+KnowledgeEmbedder().run(max_paragraphs=20, max_provisions=8)
+```
+
+---
+
 ## Raw source
 
 Work items and fetched HTML. Not a second copy of the knowledge-base graph.
@@ -630,7 +658,8 @@ One tree of provisions per act version or per subsidiary legislation. Exactly on
 | `content` | text, nullable | Body text, without amendment chrome. |
 | `amendment_note` | text, nullable | SSO `amendNote` text, e.g. `[Act 24 of 2025 wef 06/05/2026]`. |
 | `descendant_count` | integer | Size of the subtree, for outline slices. |
-| `embedding` | vector(1536), nullable | Embedding of the provision text. |
+| `embedding_text` | text, nullable | Exact string sent to the embedding model. Set only on rows that have a vector. |
+| `embedding` | vector(1536), nullable | Embedding of `embedding_text`. |
 
 ---
 

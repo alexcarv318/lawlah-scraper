@@ -123,6 +123,21 @@ class KnowledgeCaseRepository:
             CaseCounsel(case_id=case_id, counsel_id=counsel_id, represents=represents),
         )
 
+    def get_paragraphs_pending_embedding(self, limit: int | None) -> list[Paragraph]:
+        stmt = (
+            select(Paragraph)
+            .where(Paragraph.embedding.is_(None))
+            .order_by(Paragraph.id)
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        found = self.session.scalars(stmt)
+        return list(found)
+
+    @staticmethod
+    def save_paragraph_embedding(paragraph: Paragraph, embedding: list[float]) -> None:
+        paragraph.embedding = embedding
+
 
 class KnowledgeLegislationRepository:
     def __init__(self, session: Session) -> None:
@@ -232,6 +247,7 @@ class KnowledgeLegislationRepository:
                     content=provision.content,
                     amendment_note=provision.amendment_note,
                     descendant_count=provision.descendant_count,
+                    embedding_text=None,
                     embedding=None,
                 )
             )
@@ -253,3 +269,39 @@ class KnowledgeLegislationRepository:
                     definition=item.definition,
                 )
             )
+
+    def get_current_provision_trees(self) -> list[list[Provision]]:
+        act_stmt = (
+            select(Provision)
+            .join(ActVersion, Provision.act_version_id == ActVersion.id)
+            .where(ActVersion.is_current.is_(True))
+            .order_by(Provision.act_version_id, Provision.ordinal)
+        )
+        subsidiary_stmt = (
+            select(Provision)
+            .where(Provision.subsidiary_legislation_id.is_not(None))
+            .order_by(Provision.subsidiary_legislation_id, Provision.ordinal)
+        )
+
+        by_act_version: dict[int, list[Provision]] = {}
+        for provision in self.session.scalars(act_stmt):
+            if provision.act_version_id is None:
+                continue
+            by_act_version.setdefault(provision.act_version_id, []).append(provision)
+
+        by_subsidiary: dict[int, list[Provision]] = {}
+        for provision in self.session.scalars(subsidiary_stmt):
+            if provision.subsidiary_legislation_id is None:
+                continue
+            by_subsidiary.setdefault(provision.subsidiary_legislation_id, []).append(provision)
+
+        return [*by_act_version.values(), *by_subsidiary.values()]
+
+    @staticmethod
+    def save_provision_embedding(
+        provision: Provision,
+        embedding: list[float],
+        embedding_text: str,
+    ) -> None:
+        provision.embedding = embedding
+        provision.embedding_text = embedding_text
