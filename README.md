@@ -26,6 +26,7 @@ LawNet is the only case source. Acts and subsidiary legislation have versions. C
 - [Legislation parse entry points](#legislation-parse-entry-points)
 - [Legislation promote entry points](#legislation-promote-entry-points)
 - [Embedding entry points](#embedding-entry-points)
+- [Alias and reference entry points](#alias-and-reference-entry-points)
 - [Raw source](#raw-source)
   - [Cases](#raw-source-cases)
     - [raw_cases](#raw_cases)
@@ -376,6 +377,33 @@ KnowledgeEmbedder().run()
 
 # Smoke test
 KnowledgeEmbedder().run(max_paragraphs=20, max_provisions=8)
+```
+
+---
+
+## Alias and reference entry points
+
+These read promoted case paragraphs in `knowledge_base`. They do not scrape or embed.
+
+Aliases are extracted first. Every `(the “X”)` / `(“X”)` in a case becomes an `aliases` row. Kind is inferred from the expansion: case, act, rules, or fact. Fact aliases are stored but are not used as citations.
+
+References are citation spans. Identify fields (`kind`, `alias_short_name`, citations, pins, `quoted_text`) are written on extract. Foreign keys are filled in the same run when the target is already in the knowledge base, and again later by `ReferenceResolver` when more entities exist.
+
+Resolve only fills exact matches: a stored neutral citation we already have, a pin in that case, or a self-pin in the source case. Revised editions, SLR-only cites, rules, and books stay unresolved.
+
+```python
+from src.aliases.extract import CaseAliasExtractor
+from src.references.extract import CaseReferenceExtractor
+from src.references.resolve import ReferenceResolver
+
+CaseAliasExtractor().run()
+CaseReferenceExtractor().run()
+ReferenceResolver().run()
+
+# Smoke
+CaseAliasExtractor().run(max_cases=2)
+CaseReferenceExtractor().run(max_cases=2)
+ReferenceResolver().run(max_references=40)
 ```
 
 ---
@@ -748,9 +776,9 @@ An alias points at a document. A [reference](#references) can then point at this
 
 ### References
 
-A citation from a paragraph to an act, provision, case, or paragraph. At most one of the four targets. Zero targets means the cite is still unresolved.
+A citation from a paragraph to an act, provision, case, or paragraph. Identify columns are the extracted span. At most one of the four target FKs. Zero targets means the cite is still unresolved.
 
-`alias_id` is set when the paragraph used a short name from `aliases`.
+`alias_id` is set when the paragraph used a short name from `aliases`. `alias_short_name` is stored even when that row does not exist yet.
 
 | Column | Type | Description |
 |---|---|---|
@@ -762,3 +790,11 @@ A citation from a paragraph to an act, provision, case, or paragraph. At most on
 | `target_case_id` | integer, nullable | Cited case. |
 | `target_paragraph_id` | integer, nullable | Cited paragraph (pincite). |
 | `quoted_text` | text | The citation text as written. |
+| `kind` | string, nullable | `case` / `act` / `provision` / `rule` / `self` / `book`. |
+| `alias_short_name` | string, nullable | Short name used in the span. |
+| `title` | string, nullable | Case or instrument title as extracted. |
+| `neutral_citation` | string, nullable | e.g. `[2018] SGHC 96`. |
+| `slr_citation` | string, nullable | e.g. `[2009] 1 SLR(R) 844`. |
+| `edition` | string, nullable | e.g. `Cap 20, 2009 Rev Ed`. |
+| `provision_citations` | string[], not null | Pinpoints such as `s 76`, `s 36(1)`. |
+| `paragraph_pins` | integer[], not null | Case paragraph numbers. |

@@ -3,6 +3,8 @@ from datetime import date
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from src.aliases.schema import ExtractedAlias
+from src.knowledge.models.aliases import Alias
 from src.knowledge.models.cases import (
     Case,
     CaseCounsel,
@@ -21,8 +23,10 @@ from src.knowledge.models.legislation import (
 )
 from src.knowledge.models.paragraphs import Paragraph
 from src.knowledge.models.provisions import Provision
+from src.knowledge.models.references import Reference
 from src.knowledge.models.taxonomy import FunctionalRole  # noqa: F401
 from src.legislation.schema import ExtractedDefinition, FlattenedProvision
+from src.references.schema import ExtractedReference
 
 
 class KnowledgeCaseRepository:
@@ -137,6 +141,138 @@ class KnowledgeCaseRepository:
     @staticmethod
     def save_paragraph_embedding(paragraph: Paragraph, embedding: list[float]) -> None:
         paragraph.embedding = embedding
+
+    def get_cases_with_paragraphs(
+        self,
+        limit: int | None,
+    ) -> list[tuple[Case, list[Paragraph]]]:
+        stmt = select(Case).order_by(Case.id)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        cases = list(self.session.scalars(stmt))
+        if not cases:
+            return []
+
+        paragraph_stmt = (
+            select(Paragraph)
+            .where(Paragraph.case_id.in_([case.id for case in cases]))
+            .order_by(Paragraph.case_id, Paragraph.ordinal)
+        )
+        by_case: dict[int, list[Paragraph]] = {case.id: [] for case in cases}
+        for paragraph in self.session.scalars(paragraph_stmt):
+            by_case[paragraph.case_id].append(paragraph)
+        return [(case, by_case[case.id]) for case in cases]
+
+    def get_aliases_for_case(self, case_id: int) -> list[Alias]:
+        stmt = select(Alias).where(Alias.case_id == case_id).order_by(Alias.id)
+        found = self.session.scalars(stmt)
+        return list(found)
+
+    def replace_aliases(self, case_id: int, aliases: list[ExtractedAlias]) -> dict[str, int]:
+        stmt = delete(Alias).where(Alias.case_id == case_id)
+        self.session.execute(stmt)
+
+        ids: dict[str, int] = {}
+        for item in aliases:
+            row = self.persist(
+                Alias(
+                    case_id=case_id,
+                    short_name=item.short_name,
+                    expanded_text=item.expanded_text,
+                    target_act_id=None,
+                    target_case_id=None,
+                )
+            )
+            ids[item.short_name] = row.id
+        return ids
+
+    def replace_references(
+        self,
+        case_id: int,
+        references: list[ExtractedReference],
+        alias_ids: dict[str, int],
+    ) -> list[Reference]:
+        paragraph_ids = select(Paragraph.id).where(Paragraph.case_id == case_id)
+        stmt = delete(Reference).where(Reference.source_paragraph_id.in_(paragraph_ids))
+        self.session.execute(stmt)
+
+        rows: list[Reference] = []
+        for item in references:
+            alias_id = (
+                alias_ids.get(item.alias_short_name)
+                if item.alias_short_name is not None
+                else None
+            )
+            row = Reference(
+                source_paragraph_id=item.source_paragraph_id,
+                alias_id=alias_id,
+                quoted_text=item.quoted_text,
+                kind=item.kind,
+                alias_short_name=item.alias_short_name,
+                title=item.title,
+                neutral_citation=item.neutral_citation,
+                slr_citation=item.slr_citation,
+                edition=item.edition,
+                provision_citations=list(item.provision_citations),
+                paragraph_pins=list(item.paragraph_pins),
+            )
+            self.session.add(row)
+            rows.append(row)
+        self.session.flush()
+        return rows
+
+    def get_unresolved_references(self, limit: int | None) -> list[Reference]:
+        stmt = (
+            select(Reference)
+            .where(Reference.target_act_id.is_(None))
+            .where(Reference.target_provision_id.is_(None))
+            .where(Reference.target_case_id.is_(None))
+            .where(Reference.target_paragraph_id.is_(None))
+            .order_by(Reference.id)
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        found = self.session.scalars(stmt)
+        return list(found)
+
+    def get_cases_by_neutral_citations(self, citations: list[str]) -> dict[str, Case]:
+        if not citations:
+            return {}
+        stmt = select(Case).where(Case.neutral_citation.in_(citations))
+        found: dict[str, Case] = {}
+        for case in self.session.scalars(stmt):
+            found[case.neutral_citation] = case
+        return found
+
+    def get_paragraphs_by_ids(self, paragraph_ids: list[int]) -> dict[int, Paragraph]:
+        if not paragraph_ids:
+            return {}
+        stmt = select(Paragraph).where(Paragraph.id.in_(paragraph_ids))
+        found: dict[int, Paragraph] = {}
+        for paragraph in self.session.scalars(stmt):
+            found[paragraph.id] = paragraph
+        return found
+
+    def get_aliases_by_ids(self, alias_ids: list[int]) -> dict[int, Alias]:
+        if not alias_ids:
+            return {}
+        stmt = select(Alias).where(Alias.id.in_(alias_ids))
+        found: dict[int, Alias] = {}
+        for alias in self.session.scalars(stmt):
+            found[alias.id] = alias
+        return found
+
+    def get_paragraphs_by_case_ordinal(
+        self,
+        case_ids: list[int],
+    ) -> dict[tuple[int, int], Paragraph]:
+        if not case_ids:
+            return {}
+        stmt = select(Paragraph).where(Paragraph.case_id.in_(case_ids))
+        found: dict[tuple[int, int], Paragraph] = {}
+        for paragraph in self.session.scalars(stmt):
+            found[(paragraph.case_id, paragraph.ordinal)] = paragraph
+        return found
 
 
 class KnowledgeLegislationRepository:
