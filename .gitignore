@@ -21,3 +21,6 @@ wheels/
 
 *code-workspace
 scratch.py
+
+src/classification/datasets/**/*.parquet
+src/classification/checkpoints/

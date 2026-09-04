@@ -27,6 +27,8 @@ LawNet is the only case source. Acts and subsidiary legislation have versions. C
 - [Legislation promote entry points](#legislation-promote-entry-points)
 - [Embedding entry points](#embedding-entry-points)
 - [Alias and reference entry points](#alias-and-reference-entry-points)
+- [Classification training](#classification-training)
+- [Classification usage](#classification-usage)
 - [Raw source](#raw-source)
   - [Cases](#raw-source-cases)
     - [raw_cases](#raw_cases)
@@ -405,6 +407,86 @@ CaseAliasExtractor().run(max_cases=2)
 CaseReferenceExtractor().run(max_cases=2)
 ReferenceResolver().run(max_references=40)
 ```
+
+---
+
+## Classification training
+
+Trains a local classifier on the Neo4j-exported parquet files in `src/classification/datasets/`. It does not scrape, embed, or write to Postgres.
+
+There are two sources, because the role lists are different. Each source trains **three separate models**:
+
+| `--source` | Dataset | What it classifies |
+|---|---|---|
+| `judgments` | `singapore-judgments-paragraph-classification` | Case paragraphs |
+| `legislation` | `singapore-legislation-provision-classification` | Current act/SL sections |
+
+| `--task` | Head | How it is trained |
+|---|---|---|
+| `role` | one label | Cross-entropy. Rare roles are up-weighted. |
+| `topics` | 0–3 labels | Asymmetric loss, rare-topic oversampling, per-label thresholds from validation. |
+| `concepts` | 0–N labels | Same as topics. The text is prefixed with gold topics while training. Inference uses predicted topics, then the topic→concept mask. |
+
+Splits are already in the parquet files (`train` / `validation` / `test`), by `document_id`. Each task writes `src/classification/checkpoints/<source>/<task>/best.pt` (highest validation macro F1) and `epoch-N.pt`.
+
+First download of `--encoder` goes to the Hugging Face cache. Tokenizing the judgments set takes several minutes before step 1.
+
+### `python -m src.classification.training.train`
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `--source` | `judgments` \| `legislation` | required | Which dataset and role list to train. |
+| `--task` | `all` \| `role` \| `topics` \| `concepts` | `all` | Train one head or all three in order. |
+| `--encoder` | `str` | `microsoft/deberta-v3-small` | Hugging Face encoder. Small, strong text classifier. Do not change unless you know you want a different one. |
+| `--epochs` | `int` | role 3, topics 5, concepts 5 | Full passes over the train split. Pass this to override every task. |
+| `--batch-size` | `int` | `8` | Examples per step. `8` fits Apple Silicon (MPS). Use `32` on a 24 GB NVIDIA GPU. If you hit out-of-memory, drop to `16` or `8`. |
+| `--learning-rate` | `float` | `2e-5` | How hard each step updates the encoder. `2e-5` is the standard fine-tune rate. Higher can forget the pretrained model. |
+| `--max-length` | `int` | `512` | Tokens the model reads from each text. `512` is this encoder's limit. Longer paragraphs are cut from the end. |
+
+```bash
+# Local smoke: legislation is ~12k rows
+uv run python -m src.classification.training.train --source legislation --batch-size 8
+
+# One head only
+uv run python -m src.classification.training.train --source legislation --task topics --batch-size 8
+
+# GPU (RunPod RTX 4090)
+python -m src.classification.training.train --source legislation --batch-size 16
+python -m src.classification.training.train --source judgments --batch-size 16
+```
+
+Use CUDA if you have it; the script picks `cuda`, then `mps`, then `cpu`. CUDA uses fp16.
+
+The `HF Hub` warning is only about anonymous download limits. Training still works. Set `HF_TOKEN` if you want authenticated Hub access.
+
+---
+
+## Classification usage
+
+Training writes three checkpoints. Usage loads all three and labels text. It does not read parquet or Neo4j.
+
+```python
+from src.classification.classify import Classifier
+
+classifier = Classifier.load("legislation")
+result = classifier.classify("1. This Act is the Personal Data Protection Act 2012.")
+# result.role, result.topics, result.concepts
+```
+
+```bash
+uv run python -m src.classification.classify --source legislation --text "1. This Act is the Personal Data Protection Act 2012."
+```
+
+### `Classifier.load` / `python -m src.classification.classify`
+
+| Argument | Type | Description |
+|---|---|---|
+| `source` / `--source` | `judgments` \| `legislation` | Loads `src/classification/checkpoints/<source>/{role,topics,concepts}/best.pt`. |
+| `text` / `--text` | `str` | One paragraph or section. Same truncation as training (`max_length` stored in each checkpoint, default 512). |
+
+Needs a finished `best.pt` for all three tasks. Load once, call `classify` many times.
+
+Each checkpoint is one encoder plus one head. Those can go on the Hub later without the copyrighted parquet. A Hugging Face Space is a separate small Gradio app on top of `Classifier.classify`.
 
 ---
 
