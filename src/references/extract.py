@@ -94,7 +94,7 @@ class CaseReferenceExtractor:
         session_maker = get_knowledge_base_session_maker()
         with session_maker() as session:
             repository = KnowledgeCaseRepository(session)
-            cases = repository.get_cases_with_paragraphs(max_cases)
+            cases = repository.get_cases_pending_citation_extraction(max_cases)
             total = 0
 
             for case, paragraphs in cases:

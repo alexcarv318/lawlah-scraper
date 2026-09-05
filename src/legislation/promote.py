@@ -148,7 +148,7 @@ class LegislationPromoter:
 
 class LegislationRawPromoter:
     @staticmethod
-    def run(max_versions: int | None = None) -> None:
+    def run(max_versions: int | None = None, include_subsidiary: bool = True) -> None:
         raw_maker = get_raw_source_session_maker()
         knowledge_maker = get_knowledge_base_session_maker()
 
@@ -160,7 +160,9 @@ class LegislationRawPromoter:
                 parser=LegislationDocumentParser(raw_repository),
             )
             promoted_acts = promoter.promote_pending(max_versions)
-            promoted_subsidiary = promoter.promote_pending_subsidiary(max_versions)
+            promoted_subsidiary = 0
+            if include_subsidiary:
+                promoted_subsidiary = promoter.promote_pending_subsidiary(max_versions)
             knowledge_session.commit()
             raw_session.commit()
 

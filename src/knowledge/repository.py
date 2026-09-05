@@ -24,7 +24,15 @@ from src.knowledge.models.legislation import (
 from src.knowledge.models.paragraphs import Paragraph
 from src.knowledge.models.provisions import Provision
 from src.knowledge.models.references import Reference
-from src.knowledge.models.taxonomy import FunctionalRole  # noqa: F401
+from src.knowledge.models.taxonomy import (
+    Concept,
+    FunctionalRole,
+    ParagraphConcept,
+    ParagraphTopic,
+    ProvisionConcept,
+    ProvisionTopic,
+    Topic,
+)
 from src.legislation.schema import ExtractedDefinition, FlattenedProvision
 from src.references.schema import ExtractedReference
 
@@ -142,6 +150,30 @@ class KnowledgeCaseRepository:
     def save_paragraph_embedding(paragraph: Paragraph, embedding: list[float]) -> None:
         paragraph.embedding = embedding
 
+    def get_paragraphs_pending_classification(self, limit: int | None) -> list[Paragraph]:
+        stmt = (
+            select(Paragraph)
+            .where(Paragraph.functional_role_id.is_(None))
+            .order_by(Paragraph.case_id, Paragraph.ordinal)
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        found = self.session.scalars(stmt)
+        return list(found)
+
+    def save_paragraph_classification(
+        self,
+        paragraph: Paragraph,
+        role_id: int,
+        topic_ids: list[int],
+        concept_ids: list[int],
+    ) -> None:
+        paragraph.functional_role_id = role_id
+        for topic_id in topic_ids:
+            self.session.add(ParagraphTopic(paragraph_id=paragraph.id, topic_id=topic_id))
+        for concept_id in concept_ids:
+            self.session.add(ParagraphConcept(paragraph_id=paragraph.id, concept_id=concept_id))
+
     def get_cases_with_paragraphs(
         self,
         limit: int | None,
@@ -149,7 +181,25 @@ class KnowledgeCaseRepository:
         stmt = select(Case).order_by(Case.id)
         if limit is not None:
             stmt = stmt.limit(limit)
-        cases = list(self.session.scalars(stmt))
+        return self.attach_paragraphs(list(self.session.scalars(stmt)))
+
+    def get_cases_pending_citation_extraction(
+        self,
+        limit: int | None,
+    ) -> list[tuple[Case, list[Paragraph]]]:
+        has_paragraph = select(Paragraph.id).where(Paragraph.case_id == Case.id).exists()
+        has_reference = (
+            select(Reference.id)
+            .join(Paragraph, Reference.source_paragraph_id == Paragraph.id)
+            .where(Paragraph.case_id == Case.id)
+            .exists()
+        )
+        stmt = select(Case).where(has_paragraph, ~has_reference).order_by(Case.id)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return self.attach_paragraphs(list(self.session.scalars(stmt)))
+
+    def attach_paragraphs(self, cases: list[Case]) -> list[tuple[Case, list[Paragraph]]]:
         if not cases:
             return []
 
@@ -433,6 +483,19 @@ class KnowledgeLegislationRepository:
 
         return [*by_act_version.values(), *by_subsidiary.values()]
 
+    def save_provision_classification(
+        self,
+        provision: Provision,
+        role_id: int,
+        topic_ids: list[int],
+        concept_ids: list[int],
+    ) -> None:
+        provision.functional_role_id = role_id
+        for topic_id in topic_ids:
+            self.session.add(ProvisionTopic(provision_id=provision.id, topic_id=topic_id))
+        for concept_id in concept_ids:
+            self.session.add(ProvisionConcept(provision_id=provision.id, concept_id=concept_id))
+
     @staticmethod
     def save_provision_embedding(
         provision: Provision,
@@ -441,3 +504,26 @@ class KnowledgeLegislationRepository:
     ) -> None:
         provision.embedding = embedding
         provision.embedding_text = embedding_text
+
+
+class KnowledgeTaxonomyRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def get_roles(self) -> dict[str, FunctionalRole]:
+        found = list(self.session.scalars(select(FunctionalRole)))
+        if not found:
+            raise ValueError("No functional_roles in knowledge_base; seed taxonomy first")
+        return {row.name: row for row in found}
+
+    def get_topics(self) -> dict[str, Topic]:
+        found = list(self.session.scalars(select(Topic)))
+        if not found:
+            raise ValueError("No topics in knowledge_base; seed taxonomy first")
+        return {row.name: row for row in found}
+
+    def get_concepts(self) -> dict[str, Concept]:
+        found = list(self.session.scalars(select(Concept)))
+        if not found:
+            raise ValueError("No concepts in knowledge_base; seed taxonomy first")
+        return {row.name: row for row in found}

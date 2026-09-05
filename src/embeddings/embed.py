@@ -43,8 +43,22 @@ class KnowledgeEmbedder:
             case_repository = KnowledgeCaseRepository(session)
             legislation_repository = KnowledgeLegislationRepository(session)
 
-            embedded_paragraphs = self.embed_paragraphs(case_repository, session, max_paragraphs)
-            embedded_provisions = self.embed_provisions(legislation_repository, session, max_provisions)
+            embedded_paragraphs = 0
+            if max_paragraphs is None or max_paragraphs > 0:
+                embedded_paragraphs = self.embed_paragraphs(
+                    case_repository,
+                    session,
+                    max_paragraphs,
+                )
+
+            embedded_provisions = 0
+            if max_provisions is None or max_provisions > 0:
+                embedded_provisions = self.embed_provisions(
+                    legislation_repository,
+                    session,
+                    max_provisions,
+                )
+
             session.commit()
 
         logger.info(
