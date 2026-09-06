@@ -6,9 +6,12 @@ from src.database import get_raw_source_session_maker
 from src.legislation.client import StatutesOnlineClient
 from src.legislation.schema import LegislationScrapeLimits
 from src.logger import get_logger
+from src.notify.schema import FailureItem, StageReport, StageReporter, emit_report, stored_failures
 from src.raw.models.cases import FetchStatus
 from src.raw.models.legislation import RawAct
 from src.raw.repository import RawLegislationRepository
+
+FETCH_PROGRESS_EVERY = 20
 
 logger = get_logger(__name__)
 
@@ -21,6 +24,7 @@ class LegislationRawScraper:
         self,
         max_acts: int | None = None,
         max_versions: int | None = None,
+        reporter: StageReporter | None = None,
     ) -> None:
         session_maker = get_raw_source_session_maker()
 
@@ -35,17 +39,27 @@ class LegislationRawScraper:
             added_acts = scraper.discover_acts(max_acts)
             session.commit()
 
+            emit_report(
+                reporter,
+                StageReport(stage="discover acts", counts={"new acts": added_acts}),
+            )
+
             added_versions = scraper.discover_versions(max_acts)
             session.commit()
 
-            fetched = scraper.fetch_pending(max_versions)
+            emit_report(
+                reporter,
+                StageReport(stage="discover versions", counts={"new versions": added_versions}),
+            )
+
+            fetched = scraper.fetch_pending(max_versions, reporter)
             session.commit()
 
         logger.info(
             "Act scrape finished: %s new acts, %s new versions, %s versions fetched",
             added_acts,
             added_versions,
-            fetched,
+            fetched.counts.get("fetched", 0),
         )
 
     def scrape_subsidiary_legislation(
@@ -138,12 +152,19 @@ class LegislationActScraper:
         logger.info("Discovered %s act versions across %s acts", added, len(acts))
         return added
 
-    def fetch_pending(self, max_versions: int | None = None) -> int:
+    def fetch_pending(
+        self,
+        max_versions: int | None = None,
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         versions = self.repository.get_act_versions_pending_fetch(max_versions)
         logger.info("Fetching %s pending act versions", len(versions))
 
         fetched = 0
         failed = 0
+        incomplete = 0
+        last_progress = 0
+        failures: list[FailureItem] = []
 
         for version in versions:
             result = self.client.fetch_document(version.source_url)
@@ -153,6 +174,8 @@ class LegislationActScraper:
 
             if result.fetch_status != FetchStatus.SUCCESS:
                 failed += 1
+                reason = result.fetch_error or result.fetch_status.value
+                failures.append(FailureItem(version.source_url, reason))
                 logger.warning(
                     "Act version fetch failed for %s (%s): %s",
                     version.source_url,
@@ -160,6 +183,16 @@ class LegislationActScraper:
                     result.fetch_error,
                 )
             elif result.expected_provision_count != result.extracted_provision_count:
+                incomplete += 1
+                failures.append(
+                    FailureItem(
+                        version.source_url,
+                        (
+                            f"assembled {result.extracted_provision_count} of "
+                            f"{result.expected_provision_count} TOC items"
+                        ),
+                    )
+                )
                 logger.warning(
                     "Act version %s assembled %s of %s TOC items",
                     version.source_url,
@@ -167,10 +200,33 @@ class LegislationActScraper:
                     result.expected_provision_count,
                 )
 
+            if fetched - last_progress >= FETCH_PROGRESS_EVERY:
+                last_progress = fetched
+
+                emit_report(
+                    reporter,
+                    StageReport(
+                        stage="fetch",
+                        counts={"fetched": fetched, "failed": failed, "incomplete": incomplete},
+                        failures=stored_failures(failures),
+                        in_progress=True,
+                        done=fetched,
+                        total=len(versions),
+                    ),
+                )
+
             sleep(self.limits.document_pause_seconds)
 
         logger.info("Fetched %s act versions, %s failed", fetched, failed)
-        return fetched
+        report = StageReport(
+            stage="fetch",
+            counts={"fetched": fetched, "failed": failed, "incomplete": incomplete},
+            failures=stored_failures(failures),
+        )
+
+        emit_report(reporter, report)
+
+        return report
 
 
 class LegislationSubsidiaryScraper:

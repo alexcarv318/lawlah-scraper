@@ -5,6 +5,7 @@ from src.cases.parse import CaseDocumentParser
 from src.database import get_knowledge_base_session_maker, get_raw_source_session_maker
 from src.knowledge.repository import KnowledgeCaseRepository
 from src.logger import get_logger
+from src.notify.schema import FailureItem, StageReport, StageReporter, emit_report, stored_failures
 from src.raw.models.cases import RawCase, RawCaseDocument
 from src.raw.repository import RawCaseRepository
 
@@ -54,7 +55,11 @@ class CasePromoter:
         self.knowledge_repository = knowledge_repository
         self.parser = parser
 
-    def promote_pending(self, max_cases: int | None) -> int:
+    def promote_pending(
+        self,
+        max_cases: int | None,
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         pending = self.raw_repository.get_documents_pending_promote(max_cases)
         pending_citations = [raw_case.neutral_citation for raw_case, _ in pending]
 
@@ -67,38 +72,55 @@ class CasePromoter:
         )
 
         promoted = 0
+        already_in_kb = 0
         skipped = 0
+        failures: list[FailureItem] = []
         for raw_case, document in pending:
             if raw_case.neutral_citation in already_promoted:
                 self.raw_repository.mark_promoted(document)
-                skipped += 1
+                already_in_kb += 1
                 continue
-            if not self.promote_one(raw_case, document):
+
+            skip_reason = self.promote_one(raw_case, document)
+            if skip_reason is not None:
                 skipped += 1
+                failures.append(FailureItem(raw_case.neutral_citation, skip_reason))
                 continue
             self.raw_repository.mark_promoted(document)
             promoted += 1
 
         logger.info("Promoted %s cases, skipped %s", promoted, skipped)
-        return promoted
+        report = StageReport(
+            stage="promote",
+            counts={
+                "promoted": promoted,
+                "already in knowledge base": already_in_kb,
+                "failed": skipped,
+            },
+            failures=stored_failures(failures),
+        )
 
-    def promote_one(self, raw_case: RawCase, document: RawCaseDocument) -> bool:
+        emit_report(reporter, report)
+
+        return report
+
+    def promote_one(self, raw_case: RawCase, document: RawCaseDocument) -> str | None:
         citation = raw_case.neutral_citation
         if document.html is None or document.layout is None:
             logger.warning("Cannot promote %s: missing html or layout", citation)
-            return False
+            return "missing html or layout"
 
         metadata = document.source_metadata or {}
         search = raw_case.search_result or {}
         decision_date = raw_case.date or LawNetClient.parse_iso_date(metadata.get("DecisionDate"))
         if decision_date is None:
             logger.warning("Cannot promote %s: no decision date", citation)
-            return False
-        
+            return "no decision date"
+
         title = CasePromoter.case_title(metadata, search)
         if title is None:
             logger.warning("Cannot promote %s: no title", citation)
-            return False
+            return "no title"
 
         paragraphs = self.parser.extract_paragraphs(document.html, document.layout)
         if len(paragraphs) != document.extracted_paragraph_count:
@@ -108,12 +130,14 @@ class CasePromoter:
                 len(paragraphs),
                 document.extracted_paragraph_count,
             )
-            return False
+            return (
+                f"extract count {len(paragraphs)} != stored {document.extracted_paragraph_count}"
+            )
 
         court_code = CasePromoter.court_code(citation, metadata)
         if court_code is None:
             logger.warning("Cannot promote %s: no court code", citation)
-            return False
+            return "no court code"
 
         court = self.knowledge_repository.get_or_create_court(
             court_code,
@@ -127,7 +151,6 @@ class CasePromoter:
             neutral_citation=citation,
             case_number=CasePromoter.case_number(metadata, search),
         )
-        
         self.knowledge_repository.add_paragraphs(
             case.id,
             case.uri,
@@ -137,14 +160,16 @@ class CasePromoter:
         for full_name, title_abbrev in CasePromoter.judges(metadata, search):
             judge = self.knowledge_repository.get_or_create_judge(full_name, title_abbrev)
             self.knowledge_repository.add_case_judge(case.id, judge.id)
+
         for name, role in CasePromoter.parties(metadata):
             party = self.knowledge_repository.get_or_create_party(name)
             self.knowledge_repository.add_case_party(case.id, party.id, role)
+
         for name, represents in CasePromoter.counsels(metadata):
             counsel = self.knowledge_repository.get_or_create_counsel(name)
             self.knowledge_repository.add_case_counsel(case.id, counsel.id, represents)
 
-        return True
+        return None
 
     @staticmethod
     def text(value: object) -> str | None:
@@ -378,7 +403,10 @@ class CasePromoter:
 
 class CaseRawPromoter:
     @staticmethod
-    def run(max_cases: int | None) -> None:
+    def run(
+        max_cases: int | None,
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         raw_maker = get_raw_source_session_maker()
         knowledge_maker = get_knowledge_base_session_maker()
 
@@ -388,11 +416,12 @@ class CaseRawPromoter:
             case_promoter = CasePromoter(
                 raw_repository=raw_repository,
                 knowledge_repository=KnowledgeCaseRepository(knowledge_session),
-                parser=CaseDocumentParser(raw_repository)
+                parser=CaseDocumentParser(raw_repository),
             )
 
-            promoted = case_promoter.promote_pending(max_cases)
+            promoted = case_promoter.promote_pending(max_cases, reporter)
             knowledge_session.commit()
             raw_session.commit()
 
-        logger.info("Promote finished: %s cases", promoted)
+        logger.info("Promote finished: %s cases", promoted.counts.get("promoted", 0))
+        return promoted

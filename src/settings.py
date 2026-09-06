@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     embedding_model: str = "text-embedding-3-small"
 
+    bot_token: str | None = None
+
     @property
     def raw_source_database_url(self) -> str:
         return self.build_database_url(self.raw_source_database)

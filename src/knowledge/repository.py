@@ -27,6 +27,7 @@ from src.knowledge.models.references import Reference
 from src.knowledge.models.taxonomy import (
     Concept,
     FunctionalRole,
+    FunctionalRoleAppliesTo,
     ParagraphConcept,
     ParagraphTopic,
     ProvisionConcept,
@@ -527,3 +528,42 @@ class KnowledgeTaxonomyRepository:
         if not found:
             raise ValueError("No concepts in knowledge_base; seed taxonomy first")
         return {row.name: row for row in found}
+
+    def persist[T](self, row: T) -> T:
+        self.session.add(row)
+        self.session.flush()
+        return row
+
+    def ensure_topic(self, name: str) -> tuple[Topic, bool]:
+        existing = self.session.scalar(select(Topic).where(Topic.name == name))
+        if existing is not None:
+            return existing, False
+        return self.persist(Topic(name=name, description=name)), True
+
+    def ensure_concept(self, name: str, topic_id: int) -> tuple[Concept, bool]:
+        existing = self.session.scalar(select(Concept).where(Concept.name == name))
+        if existing is not None:
+            if existing.topic_id != topic_id:
+                existing.topic_id = topic_id
+            return existing, False
+        return self.persist(Concept(name=name, topic_id=topic_id, description=name)), True
+
+    def ensure_role(
+        self,
+        name: str,
+        applies_to: FunctionalRoleAppliesTo,
+    ) -> tuple[FunctionalRole, bool]:
+        existing = self.session.scalar(select(FunctionalRole).where(FunctionalRole.name == name))
+        if existing is not None:
+            if existing.applies_to != applies_to:
+                raise ValueError(
+                    f"Role {name!r} already applies to {existing.applies_to.value}, "
+                    f"cannot seed as {applies_to.value}"
+                )
+            return existing, False
+        return (
+            self.persist(
+                FunctionalRole(name=name, description=name, applies_to=applies_to)
+            ),
+            True,
+        )

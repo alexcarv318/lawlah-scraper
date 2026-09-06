@@ -9,8 +9,10 @@ from src.knowledge.repository import (
     KnowledgeTaxonomyRepository,
 )
 from src.logger import get_logger
+from src.notify.schema import StageReport, StageReporter, emit_report
 
 COMMIT_EVERY = 32
+CLASSIFY_PROGRESS_EVERY = 200
 
 logger = get_logger(__name__)
 
@@ -76,7 +78,11 @@ class KnowledgeClassifier:
             taxonomy.concept_ids(result.concepts),
         )
 
-    def classify_paragraphs(self, max_paragraphs: int | None = None) -> None:
+    def classify_paragraphs(
+        self,
+        max_paragraphs: int | None = None,
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         classifier = Classifier.load("judgments")
         session_maker = get_knowledge_base_session_maker()
 
@@ -87,8 +93,10 @@ class KnowledgeClassifier:
             logger.info("Classifying %s paragraphs", len(pending))
 
             classified = 0
+            skipped_empty = 0
             for paragraph in pending:
                 if not paragraph.content.strip():
+                    skipped_empty += 1
                     continue
                 role_id, topic_ids, concept_ids = self.label_ids(
                     taxonomy,
@@ -105,12 +113,36 @@ class KnowledgeClassifier:
                 if classified % COMMIT_EVERY == 0:
                     session.commit()
                     logger.info("Classified %s of %s paragraphs", classified, len(pending))
+                if classified % CLASSIFY_PROGRESS_EVERY == 0:
+
+                    emit_report(
+                        reporter,
+                        StageReport(
+                            stage="classify",
+                            counts={"classified": classified},
+                            in_progress=True,
+                            done=classified,
+                            total=len(pending),
+                        ),
+                    )
 
             session.commit()
 
         logger.info("Paragraph classification finished: %s paragraphs", classified)
+        report = StageReport(
+            stage="classify",
+            counts={"classified": classified, "empty skipped": skipped_empty},
+        )
 
-    def classify_provisions(self, max_provisions: int | None = None) -> None:
+        emit_report(reporter, report)
+
+        return report
+
+    def classify_provisions(
+        self,
+        max_provisions: int | None = None,
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         classifier = Classifier.load("legislation")
         session_maker = get_knowledge_base_session_maker()
 
@@ -136,6 +168,14 @@ class KnowledgeClassifier:
                     break
 
         logger.info("Provision classification finished: %s sections", classified)
+        report = StageReport(
+            stage="classify",
+            counts={"classified sections": classified, "documents": len(trees)},
+        )
+
+        emit_report(reporter, report)
+
+        return report
 
     def classify_document_sections(
         self,

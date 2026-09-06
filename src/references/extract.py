@@ -10,6 +10,7 @@ from src.knowledge.models.paragraphs import Paragraph
 from src.knowledge.models.references import CitationKind
 from src.knowledge.repository import KnowledgeCaseRepository
 from src.logger import get_logger
+from src.notify.schema import StageReport, StageReporter, emit_report
 from src.references.resolve import ReferenceResolver
 from src.references.schema import DiscourseState, ExtractedReference
 
@@ -90,12 +91,17 @@ class CaseReferenceExtractor:
         )
         self.word_boundary_end: Pattern[str] = re.compile(r"\w")
 
-    def run(self, max_cases: int | None = None) -> None:
+    def run(
+        self,
+        max_cases: int | None = None,
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         session_maker = get_knowledge_base_session_maker()
         with session_maker() as session:
             repository = KnowledgeCaseRepository(session)
             cases = repository.get_cases_pending_citation_extraction(max_cases)
             total = 0
+            resolved_total = 0
 
             for case, paragraphs in cases:
                 stored = repository.get_aliases_for_case(case.id)
@@ -106,6 +112,7 @@ class CaseReferenceExtractor:
                 resolved = ReferenceResolver.resolve_rows(repository, rows)
                 session.commit()
                 total += len(extracted)
+                resolved_total += resolved
                 logger.info(
                     "References for %s: %s extracted, %s resolved",
                     case.neutral_citation,
@@ -118,6 +125,14 @@ class CaseReferenceExtractor:
             total,
             len(cases),
         )
+        report = StageReport(
+            stage="references",
+            counts={"cases": len(cases), "extracted": total, "resolved": resolved_total},
+        )
+
+        emit_report(reporter, report)
+
+        return report
 
     def extract_case(
         self,

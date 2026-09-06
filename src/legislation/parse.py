@@ -14,6 +14,7 @@ from src.legislation.schema import (
     LegislationParse,
 )
 from src.logger import get_logger
+from src.notify.schema import FailureItem, StageReport, StageReporter, emit_report, stored_failures
 from src.raw.models.cases import ParseStatus
 from src.raw.repository import RawLegislationRepository
 
@@ -24,16 +25,26 @@ class LegislationDocumentParser:
     def __init__(self, repository: RawLegislationRepository) -> None:
         self.repository = repository
 
-    def parse_pending(self, max_versions: int | None) -> int:
+    def parse_pending(
+        self,
+        max_versions: int | None,
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         pending = self.repository.get_act_versions_pending_parse(max_versions)
         logger.info("Parsing %s pending act versions", len(pending))
 
         counts: Counter[ParseStatus] = Counter()
+        failures: list[FailureItem] = []
         for act, version in pending:
             result = self.parse_html(version.html)
             self.repository.save_act_version_parse(act, version, result)
             counts[result.parse_status] += 1
-            self._log_parse(act.slug, version.valid_from.isoformat(), result)
+
+            label = f"{act.slug} {version.valid_from.isoformat()}"
+            self.log_parse(act.slug, version.valid_from.isoformat(), result)
+            failure = self.parse_failure(label, result)
+            if failure is not None:
+                failures.append(failure)
 
         logger.info(
             "Parsed %s act versions: %s complete, %s incomplete, %s unknown_layout, %s failed",
@@ -43,7 +54,21 @@ class LegislationDocumentParser:
             counts[ParseStatus.UNKNOWN_LAYOUT],
             counts[ParseStatus.FAILED],
         )
-        return len(pending)
+        report = StageReport(
+            stage="parse",
+            counts={
+                "parsed": len(pending),
+                "complete": counts[ParseStatus.COMPLETE],
+                "incomplete": counts[ParseStatus.INCOMPLETE],
+                "unknown layout": counts[ParseStatus.UNKNOWN_LAYOUT],
+                "failed": counts[ParseStatus.FAILED],
+            },
+            failures=stored_failures(failures),
+        )
+
+        emit_report(reporter, report)
+
+        return report
 
     def parse_pending_subsidiary(self, max_versions: int | None) -> int:
         pending = self.repository.get_subsidiary_versions_pending_parse(max_versions)
@@ -54,7 +79,7 @@ class LegislationDocumentParser:
             result = self.parse_html(version.html)
             self.repository.save_subsidiary_version_parse(instrument, version, result)
             counts[result.parse_status] += 1
-            self._log_parse(instrument.slug, version.valid_from.isoformat(), result)
+            self.log_parse(instrument.slug, version.valid_from.isoformat(), result)
 
         logger.info(
             "Parsed %s subsidiary legislation versions: %s complete, %s incomplete, %s unknown_layout, %s failed",
@@ -67,7 +92,7 @@ class LegislationDocumentParser:
         return len(pending)
 
     @staticmethod
-    def _log_parse(slug: str, valid_from: str, result: LegislationParse) -> None:
+    def log_parse(slug: str, valid_from: str, result: LegislationParse) -> None:
         if result.parse_status == ParseStatus.INCOMPLETE:
             logger.warning(
                 "Incomplete parse for %s %s: expected=%s extracted=%s",
@@ -80,6 +105,22 @@ class LegislationDocumentParser:
             logger.warning("Unknown layout for %s %s", slug, valid_from)
         elif result.parse_status == ParseStatus.FAILED:
             logger.warning("Parse failed for %s %s", slug, valid_from)
+
+    @staticmethod
+    def parse_failure(label: str, result: LegislationParse) -> FailureItem | None:
+        if result.parse_status == ParseStatus.INCOMPLETE:
+            return FailureItem(
+                label,
+                (
+                    f"incomplete: expected={result.expected_provision_count} "
+                    f"extracted={result.extracted_provision_count}"
+                ),
+            )
+        if result.parse_status == ParseStatus.UNKNOWN_LAYOUT:
+            return FailureItem(label, "unknown layout")
+        if result.parse_status == ParseStatus.FAILED:
+            return FailureItem(label, "parse failed")
+        return None
 
     @staticmethod
     def parse_html(html: str | None) -> LegislationParse:
@@ -785,18 +826,23 @@ class LegislationDocumentParser:
         value = tag.get(name)
         return value if isinstance(value, str) and value else None
 
+
 class LegislationRawParser:
     @staticmethod
-    def run(max_versions: int | None = None) -> None:
+    def run(
+        max_versions: int | None = None,
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         session_maker = get_raw_source_session_maker()
         with session_maker() as session:
             parser = LegislationDocumentParser(RawLegislationRepository(session))
-            parsed_acts = parser.parse_pending(max_versions)
+            parsed_acts = parser.parse_pending(max_versions, reporter)
             parsed_subsidiary = parser.parse_pending_subsidiary(max_versions)
             session.commit()
 
         logger.info(
             "Raw legislation parse finished: %s act versions, %s subsidiary legislation versions",
-            parsed_acts,
+            parsed_acts.counts.get("parsed", 0),
             parsed_subsidiary,
         )
+        return parsed_acts

@@ -23,4 +23,6 @@ wheels/
 scratch.py
 
 src/classification/datasets/**/*.parquet
-src/classification/checkpoints/
+src/classification/checkpoints/**/*.pt
+
+data/telegram_chats.json

@@ -6,6 +6,7 @@ from src.database import get_knowledge_base_session_maker
 from src.knowledge.models.paragraphs import Paragraph
 from src.knowledge.repository import KnowledgeCaseRepository
 from src.logger import get_logger
+from src.notify.schema import StageReport, StageReporter, emit_report
 
 logger = get_logger(__name__)
 
@@ -49,7 +50,11 @@ class CaseAliasExtractor:
             r"([A-Z][A-Za-z0-9'’\-]*(?:\s+[A-Za-z0-9'’\-]+){0,12})\s*$"
         )
 
-    def run(self, max_cases: int | None = None) -> None:
+    def run(
+        self,
+        max_cases: int | None = None,
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         session_maker = get_knowledge_base_session_maker()
         with session_maker() as session:
             repository = KnowledgeCaseRepository(session)
@@ -68,6 +73,11 @@ class CaseAliasExtractor:
             total,
             len(cases),
         )
+        report = StageReport(stage="aliases", counts={"cases": len(cases), "aliases": total})
+
+        emit_report(reporter, report)
+
+        return report
 
     def extract_case(self, paragraphs: list[Paragraph]) -> list[ExtractedAlias]:
         seen: dict[str, ExtractedAlias] = {}

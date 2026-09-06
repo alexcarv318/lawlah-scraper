@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup, Tag
 from src.cases.schema import DocumentParse, ExtractedParagraph
 from src.database import get_raw_source_session_maker
 from src.logger import get_logger
+from src.notify.schema import FailureItem, StageReport, StageReporter, emit_report, stored_failures
 from src.raw.models.cases import CaseDocumentLayout, ParseStatus
 from src.raw.repository import RawCaseRepository
 
@@ -30,28 +31,24 @@ class CaseDocumentParser:
     def __init__(self, repository: RawCaseRepository) -> None:
         self.repository = repository
 
-    def parse_pending(self, max_documents: int | None) -> int:
+    def parse_pending(
+        self,
+        max_documents: int | None,
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         pending = self.repository.get_documents_pending_parse(max_documents)
         logger.info("Parsing %s pending documents", len(pending))
 
         counts: Counter[ParseStatus] = Counter()
+        failures: list[FailureItem] = []
         for raw_case, document in pending:
             result = self.parse_html(document.html)
             self.repository.save_parse_result(raw_case, document, result)
             counts[result.parse_status] += 1
-
-            if result.parse_status == ParseStatus.INCOMPLETE:
-                logger.warning(
-                    "Incomplete parse for %s (%s): expected=%s extracted=%s",
-                    raw_case.neutral_citation,
-                    result.layout.value,
-                    result.expected_paragraph_count,
-                    result.extracted_paragraph_count,
-                )
-            elif result.parse_status == ParseStatus.UNKNOWN_LAYOUT:
-                logger.warning("Unknown layout for %s", raw_case.neutral_citation)
-            elif result.parse_status == ParseStatus.FAILED:
-                logger.warning("Parse failed for %s", raw_case.neutral_citation)
+            self.log_parse(raw_case.neutral_citation, result)
+            failure = self.parse_failure(raw_case.neutral_citation, result)
+            if failure is not None:
+                failures.append(failure)
 
         logger.info(
             "Parsed %s documents: %s complete, %s incomplete, %s unknown_layout, %s failed",
@@ -61,7 +58,53 @@ class CaseDocumentParser:
             counts[ParseStatus.UNKNOWN_LAYOUT],
             counts[ParseStatus.FAILED],
         )
-        return len(pending)
+        report = StageReport(
+            stage="parse",
+            counts={
+                "parsed": len(pending),
+                "complete": counts[ParseStatus.COMPLETE],
+                "incomplete": counts[ParseStatus.INCOMPLETE],
+                "unknown layout": counts[ParseStatus.UNKNOWN_LAYOUT],
+                "failed": counts[ParseStatus.FAILED],
+            },
+            failures=stored_failures(failures),
+        )
+
+        emit_report(reporter, report)
+
+        return report
+
+    @staticmethod
+    def log_parse(citation: str, result: DocumentParse) -> None:
+        if result.parse_status == ParseStatus.INCOMPLETE:
+            logger.warning(
+                "Incomplete parse for %s (%s): expected=%s extracted=%s",
+                citation,
+                result.layout.value,
+                result.expected_paragraph_count,
+                result.extracted_paragraph_count,
+            )
+        elif result.parse_status == ParseStatus.UNKNOWN_LAYOUT:
+            logger.warning("Unknown layout for %s", citation)
+        elif result.parse_status == ParseStatus.FAILED:
+            logger.warning("Parse failed for %s", citation)
+
+    @staticmethod
+    def parse_failure(citation: str, result: DocumentParse) -> FailureItem | None:
+        if result.parse_status == ParseStatus.INCOMPLETE:
+            return FailureItem(
+                citation,
+                (
+                    f"incomplete ({result.layout.value}): "
+                    f"expected={result.expected_paragraph_count} "
+                    f"extracted={result.extracted_paragraph_count}"
+                ),
+            )
+        if result.parse_status == ParseStatus.UNKNOWN_LAYOUT:
+            return FailureItem(citation, "unknown layout")
+        if result.parse_status == ParseStatus.FAILED:
+            return FailureItem(citation, "parse failed")
+        return None
 
     @staticmethod
     def parse_html(html: str | None) -> DocumentParse:
@@ -244,9 +287,17 @@ class CaseDocumentParser:
 
 class CaseRawParser:
     @staticmethod
-    def run(max_documents: int | None = None) -> None:
+    def run(
+        max_documents: int | None = None,
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         session_maker = get_raw_source_session_maker()
         with session_maker() as session:
-            parsed = CaseDocumentParser(RawCaseRepository(session)).parse_pending(max_documents)
+            parsed = CaseDocumentParser(RawCaseRepository(session)).parse_pending(
+                max_documents,
+                reporter,
+            )
             session.commit()
-        logger.info("Raw parse finished: %s documents parsed", parsed)
+
+        logger.info("Raw parse finished: %s documents parsed", parsed.counts.get("parsed", 0))
+        return parsed

@@ -2,6 +2,7 @@ from src.database import get_knowledge_base_session_maker, get_raw_source_sessio
 from src.knowledge.repository import KnowledgeLegislationRepository
 from src.legislation.parse import LegislationDocumentParser
 from src.logger import get_logger
+from src.notify.schema import FailureItem, StageReport, StageReporter, emit_report, stored_failures
 from src.raw.models.cases import ParseStatus
 from src.raw.models.legislation import RawAct, RawActVersion
 from src.raw.repository import RawLegislationRepository
@@ -20,7 +21,11 @@ class LegislationPromoter:
         self.knowledge_repository = knowledge_repository
         self.parser = parser
 
-    def promote_pending(self, max_versions: int | None) -> int:
+    def promote_pending(
+        self,
+        max_versions: int | None,
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         pending = self.raw_repository.get_act_versions_pending_promote(max_versions)
         version_uris = [
             LegislationPromoter.act_version_uri(act, version)
@@ -35,21 +40,40 @@ class LegislationPromoter:
         )
 
         promoted = 0
+        already_in_kb = 0
         skipped = 0
+        failures: list[FailureItem] = []
         for act, version in pending:
             version_uri = LegislationPromoter.act_version_uri(act, version)
+            label = f"{act.slug} {version.valid_from.isoformat()}"
+
             if version_uri in already_promoted:
                 self.raw_repository.mark_act_version_promoted(version)
-                skipped += 1
+                already_in_kb += 1
                 continue
-            if not self.promote_act_version(act, version, version_uri):
+
+            skip_reason = self.promote_act_version(act, version, version_uri)
+            if skip_reason is not None:
                 skipped += 1
+                failures.append(FailureItem(label, skip_reason))
                 continue
             self.raw_repository.mark_act_version_promoted(version)
             promoted += 1
 
         logger.info("Promoted %s act versions, skipped %s", promoted, skipped)
-        return promoted
+        report = StageReport(
+            stage="promote",
+            counts={
+                "promoted": promoted,
+                "already in knowledge base": already_in_kb,
+                "failed": skipped,
+            },
+            failures=stored_failures(failures),
+        )
+
+        emit_report(reporter, report)
+
+        return report
 
     def promote_pending_subsidiary(self, max_versions: int | None) -> int:
         pending = self.raw_repository.get_subsidiary_versions_pending_promote(max_versions)
@@ -104,10 +128,10 @@ class LegislationPromoter:
         logger.info("Promoted %s subsidiary legislations, skipped %s", promoted, skipped)
         return promoted
 
-    def promote_act_version(self, act: RawAct, version: RawActVersion, version_uri: str) -> bool:
+    def promote_act_version(self, act: RawAct, version: RawActVersion, version_uri: str) -> str | None:
         if version.html is None:
             logger.warning("Cannot promote %s %s: missing html", act.slug, version.valid_from)
-            return False
+            return "missing html"
 
         parsed = self.parser.parse_html(version.html)
         if (
@@ -121,7 +145,10 @@ class LegislationPromoter:
                 parsed.extracted_provision_count,
                 version.extracted_provision_count,
             )
-            return False
+            return (
+                f"extract count {parsed.extracted_provision_count} != stored "
+                f"{version.extracted_provision_count}"
+            )
 
         flattened = self.parser.flatten(parsed.provisions)
         knowledge_act = self.knowledge_repository.get_or_create_act(act.source_url, act.title)
@@ -139,7 +166,7 @@ class LegislationPromoter:
         if version.is_current:
             self.knowledge_repository.replace_definitions(knowledge_act.id, parsed.definitions)
 
-        return True
+        return None
 
     @staticmethod
     def act_version_uri(act: RawAct, version: RawActVersion) -> str:
@@ -148,7 +175,11 @@ class LegislationPromoter:
 
 class LegislationRawPromoter:
     @staticmethod
-    def run(max_versions: int | None = None, include_subsidiary: bool = True) -> None:
+    def run(
+        max_versions: int | None = None,
+        include_subsidiary: bool = True,
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         raw_maker = get_raw_source_session_maker()
         knowledge_maker = get_knowledge_base_session_maker()
 
@@ -159,7 +190,7 @@ class LegislationRawPromoter:
                 knowledge_repository=KnowledgeLegislationRepository(knowledge_session),
                 parser=LegislationDocumentParser(raw_repository),
             )
-            promoted_acts = promoter.promote_pending(max_versions)
+            promoted_acts = promoter.promote_pending(max_versions, reporter)
             promoted_subsidiary = 0
             if include_subsidiary:
                 promoted_subsidiary = promoter.promote_pending_subsidiary(max_versions)
@@ -168,6 +199,7 @@ class LegislationRawPromoter:
 
         logger.info(
             "Promote finished: %s act versions, %s subsidiary legislations",
-            promoted_acts,
+            promoted_acts.counts.get("promoted", 0),
             promoted_subsidiary,
         )
+        return promoted_acts

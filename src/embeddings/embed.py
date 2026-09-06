@@ -13,6 +13,7 @@ from src.knowledge.repository import (
     KnowledgeLegislationRepository,
 )
 from src.logger import get_logger
+from src.notify.schema import StageReport, StageReporter, emit_report
 from src.settings import get_settings
 
 logger = get_logger(__name__)
@@ -37,7 +38,8 @@ class KnowledgeEmbedder:
         self,
         max_paragraphs: int | None = None,
         max_provisions: int | None = None,
-    ) -> None:
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         session_maker = get_knowledge_base_session_maker()
         with session_maker() as session:
             case_repository = KnowledgeCaseRepository(session)
@@ -49,6 +51,7 @@ class KnowledgeEmbedder:
                     case_repository,
                     session,
                     max_paragraphs,
+                    reporter,
                 )
 
             embedded_provisions = 0
@@ -57,6 +60,7 @@ class KnowledgeEmbedder:
                     legislation_repository,
                     session,
                     max_provisions,
+                    reporter,
                 )
 
             session.commit()
@@ -66,12 +70,21 @@ class KnowledgeEmbedder:
             embedded_paragraphs,
             embedded_provisions,
         )
+        report = StageReport(
+            stage="embed",
+            counts={"paragraphs": embedded_paragraphs, "provisions": embedded_provisions},
+        )
+
+        emit_report(reporter, report)
+
+        return report
 
     def embed_paragraphs(
         self,
         repository: KnowledgeCaseRepository,
         session: Session,
         limit: int | None,
+        reporter: StageReporter | None = None,
     ) -> int:
         pending = [
             paragraph
@@ -88,7 +101,19 @@ class KnowledgeEmbedder:
                 repository.save_paragraph_embedding(paragraph, vector)
                 embedded += 1
             session.commit()
+
             logger.info("Embedded %s of %s paragraphs", embedded, len(pending))
+
+            emit_report(
+                reporter,
+                StageReport(
+                    stage="embed",
+                    counts={"paragraphs": embedded},
+                    in_progress=True,
+                    done=embedded,
+                    total=len(pending),
+                ),
+            )
 
         return embedded
 
@@ -97,6 +122,7 @@ class KnowledgeEmbedder:
         repository: KnowledgeLegislationRepository,
         session: Session,
         limit: int | None,
+        reporter: StageReporter | None = None,
     ) -> int:
         trees = repository.get_current_provision_trees()
         nodes_by_id = {node.id: node for tree in trees for node in tree}
@@ -123,6 +149,17 @@ class KnowledgeEmbedder:
             session.commit()
 
             logger.info("Embedded %s of %s provision units", embedded, len(units))
+
+            emit_report(
+                reporter,
+                StageReport(
+                    stage="embed",
+                    counts={"provisions": embedded},
+                    in_progress=True,
+                    done=embedded,
+                    total=len(units),
+                ),
+            )
 
         return embedded
 

@@ -7,13 +7,17 @@ from src.knowledge.models.paragraphs import Paragraph
 from src.knowledge.models.references import CitationKind, Reference
 from src.knowledge.repository import KnowledgeCaseRepository
 from src.logger import get_logger
+from src.notify.schema import StageReport, StageReporter, emit_report
 
 logger = get_logger(__name__)
 
 
 class ReferenceResolver:
     @staticmethod
-    def run(max_references: int | None = None) -> None:
+    def run(
+        max_references: int | None = None,
+        reporter: StageReporter | None = None,
+    ) -> StageReport:
         session_maker = get_knowledge_base_session_maker()
         with session_maker() as session:
             repository = KnowledgeCaseRepository(session)
@@ -22,6 +26,14 @@ class ReferenceResolver:
             session.commit()
 
         logger.info("Resolved %s of %s references", resolved, len(unresolved))
+        report = StageReport(
+            stage="resolve",
+            counts={"resolved": resolved, "still unresolved": len(unresolved) - resolved},
+        )
+
+        emit_report(reporter, report)
+
+        return report
 
     @staticmethod
     def resolve_rows(
