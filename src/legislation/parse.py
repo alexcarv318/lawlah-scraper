@@ -12,6 +12,7 @@ from src.legislation.schema import (
     ExtractedProvision,
     FlattenedProvision,
     LegislationParse,
+    LegislationScrapeLimits,
 )
 from src.logger import get_logger
 from src.notify.schema import FailureItem, StageReport, StageReporter, emit_report, stored_failures
@@ -29,13 +30,15 @@ class LegislationDocumentParser:
         self,
         max_versions: int | None,
         reporter: StageReporter | None = None,
+        limits: LegislationScrapeLimits | None = None,
     ) -> StageReport:
+        persist_every = (limits or LegislationScrapeLimits()).parse_persist_every
         pending = self.repository.get_act_versions_pending_parse(max_versions)
         logger.info("Parsing %s pending act versions", len(pending))
 
         counts: Counter[ParseStatus] = Counter()
         failures: list[FailureItem] = []
-        for act, version in pending:
+        for parsed, (act, version) in enumerate(pending, start=1):
             result = self.parse_html(version.html)
             self.repository.save_act_version_parse(act, version, result)
             counts[result.parse_status] += 1
@@ -45,6 +48,25 @@ class LegislationDocumentParser:
             failure = self.parse_failure(label, result)
             if failure is not None:
                 failures.append(failure)
+            if parsed % persist_every == 0:
+                self.repository.session.commit()
+                emit_report(
+                    reporter,
+                    StageReport(
+                        stage="parse",
+                        counts={
+                            "parsed": parsed,
+                            "complete": counts[ParseStatus.COMPLETE],
+                            "incomplete": counts[ParseStatus.INCOMPLETE],
+                            "unknown layout": counts[ParseStatus.UNKNOWN_LAYOUT],
+                            "failed": counts[ParseStatus.FAILED],
+                        },
+                        failures=stored_failures(failures),
+                        in_progress=True,
+                        done=parsed,
+                        total=len(pending),
+                    ),
+                )
 
         logger.info(
             "Parsed %s act versions: %s complete, %s incomplete, %s unknown_layout, %s failed",
@@ -70,16 +92,23 @@ class LegislationDocumentParser:
 
         return report
 
-    def parse_pending_subsidiary(self, max_versions: int | None) -> int:
+    def parse_pending_subsidiary(
+        self,
+        max_versions: int | None,
+        limits: LegislationScrapeLimits | None = None,
+    ) -> int:
+        persist_every = (limits or LegislationScrapeLimits()).parse_persist_every
         pending = self.repository.get_subsidiary_versions_pending_parse(max_versions)
         logger.info("Parsing %s pending subsidiary legislation versions", len(pending))
 
         counts: Counter[ParseStatus] = Counter()
-        for instrument, version in pending:
+        for parsed, (instrument, version) in enumerate(pending, start=1):
             result = self.parse_html(version.html)
             self.repository.save_subsidiary_version_parse(instrument, version, result)
             counts[result.parse_status] += 1
             self.log_parse(instrument.slug, version.valid_from.isoformat(), result)
+            if parsed % persist_every == 0:
+                self.repository.session.commit()
 
         logger.info(
             "Parsed %s subsidiary legislation versions: %s complete, %s incomplete, %s unknown_layout, %s failed",
@@ -836,8 +865,9 @@ class LegislationRawParser:
         session_maker = get_raw_source_session_maker()
         with session_maker() as session:
             parser = LegislationDocumentParser(RawLegislationRepository(session))
-            parsed_acts = parser.parse_pending(max_versions, reporter)
-            parsed_subsidiary = parser.parse_pending_subsidiary(max_versions)
+            limits = LegislationScrapeLimits()
+            parsed_acts = parser.parse_pending(max_versions, reporter, limits)
+            parsed_subsidiary = parser.parse_pending_subsidiary(max_versions, limits)
             session.commit()
 
         logger.info(

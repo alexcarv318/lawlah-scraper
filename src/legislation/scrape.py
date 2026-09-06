@@ -115,16 +115,16 @@ class LegislationActScraper:
         )
         added = 0
 
-        for listing in listings:
-            if listing.slug in existing:
-                continue
-
-            self.repository.add_discovered_act(
-                listing.slug,
-                listing.title,
-                listing.source_url,
-            )
-            added += 1
+        for index, listing in enumerate(listings, start=1):
+            if listing.slug not in existing:
+                self.repository.add_discovered_act(
+                    listing.slug,
+                    listing.title,
+                    listing.source_url,
+                )
+                added += 1
+            if index % self.limits.discover_persist_every == 0:
+                self.session.commit()
 
         logger.info("Discovered %s acts (%s new)", len(listings), added)
         return added
@@ -147,6 +147,7 @@ class LegislationActScraper:
                 )
                 added += 1
 
+            self.session.commit()
             sleep(self.limits.browse_pause_seconds)
 
         logger.info("Discovered %s act versions across %s acts", added, len(acts))
@@ -264,6 +265,7 @@ class LegislationSubsidiaryScraper:
                 )
                 added += 1
 
+            self.session.commit()
             sleep(self.limits.browse_pause_seconds)
 
         logger.info("Discovered %s subsidiary legislations from %s stored acts", added, len(acts))
@@ -289,6 +291,7 @@ class LegislationSubsidiaryScraper:
                 )
                 added += 1
 
+            self.session.commit()
             sleep(self.limits.browse_pause_seconds)
 
         logger.info(

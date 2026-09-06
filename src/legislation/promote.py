@@ -1,6 +1,7 @@
 from src.database import get_knowledge_base_session_maker, get_raw_source_session_maker
 from src.knowledge.repository import KnowledgeLegislationRepository
 from src.legislation.parse import LegislationDocumentParser
+from src.legislation.schema import LegislationScrapeLimits
 from src.logger import get_logger
 from src.notify.schema import FailureItem, StageReport, StageReporter, emit_report, stored_failures
 from src.raw.models.cases import ParseStatus
@@ -25,7 +26,9 @@ class LegislationPromoter:
         self,
         max_versions: int | None,
         reporter: StageReporter | None = None,
+        limits: LegislationScrapeLimits | None = None,
     ) -> StageReport:
+        persist_every = (limits or LegislationScrapeLimits()).promote_persist_every
         pending = self.raw_repository.get_act_versions_pending_promote(max_versions)
         version_uris = [
             LegislationPromoter.act_version_uri(act, version)
@@ -43,22 +46,40 @@ class LegislationPromoter:
         already_in_kb = 0
         skipped = 0
         failures: list[FailureItem] = []
-        for act, version in pending:
+        for processed, (act, version) in enumerate(pending, start=1):
             version_uri = LegislationPromoter.act_version_uri(act, version)
             label = f"{act.slug} {version.valid_from.isoformat()}"
 
             if version_uri in already_promoted:
                 self.raw_repository.mark_act_version_promoted(version)
                 already_in_kb += 1
-                continue
+            else:
+                skip_reason = self.promote_act_version(act, version, version_uri)
+                if skip_reason is not None:
+                    skipped += 1
+                    failures.append(FailureItem(label, skip_reason))
+                else:
+                    self.raw_repository.mark_act_version_promoted(version)
+                    promoted += 1
 
-            skip_reason = self.promote_act_version(act, version, version_uri)
-            if skip_reason is not None:
-                skipped += 1
-                failures.append(FailureItem(label, skip_reason))
-                continue
-            self.raw_repository.mark_act_version_promoted(version)
-            promoted += 1
+            if processed % persist_every == 0:
+                self.knowledge_repository.session.commit()
+                self.raw_repository.session.commit()
+                emit_report(
+                    reporter,
+                    StageReport(
+                        stage="promote",
+                        counts={
+                            "promoted": promoted,
+                            "already in knowledge base": already_in_kb,
+                            "failed": skipped,
+                        },
+                        failures=stored_failures(failures),
+                        in_progress=True,
+                        done=processed,
+                        total=len(pending),
+                    ),
+                )
 
         logger.info("Promoted %s act versions, skipped %s", promoted, skipped)
         report = StageReport(
@@ -75,7 +96,12 @@ class LegislationPromoter:
 
         return report
 
-    def promote_pending_subsidiary(self, max_versions: int | None) -> int:
+    def promote_pending_subsidiary(
+        self,
+        max_versions: int | None,
+        limits: LegislationScrapeLimits | None = None,
+    ) -> int:
+        persist_every = (limits or LegislationScrapeLimits()).promote_persist_every
         pending = self.raw_repository.get_subsidiary_versions_pending_promote(max_versions)
         instrument_uris = [instrument.source_url for _, instrument, _ in pending]
         already_promoted = self.knowledge_repository.get_existing_subsidiary_uris(instrument_uris)
@@ -88,42 +114,47 @@ class LegislationPromoter:
 
         promoted = 0
         skipped = 0
-        for act, instrument, version in pending:
+        for processed, (act, instrument, version) in enumerate(pending, start=1):
             if instrument.source_url in already_promoted:
                 self.raw_repository.mark_subsidiary_version_promoted(version)
                 skipped += 1
-                continue
+            else:
+                parsed = self.parser.parse_html(version.html)
+                flattened = self.parser.flatten(parsed.provisions)
+                if (
+                    parsed.parse_status != ParseStatus.COMPLETE
+                    or parsed.extracted_provision_count != version.extracted_provision_count
+                ):
+                    logger.warning(
+                        "Cannot promote %s: extract count %s != stored %s",
+                        instrument.slug,
+                        parsed.extracted_provision_count,
+                        version.extracted_provision_count,
+                    )
+                    skipped += 1
+                else:
+                    knowledge_act = self.knowledge_repository.get_or_create_act(
+                        act.source_url,
+                        act.title,
+                    )
+                    row = self.knowledge_repository.add_subsidiary_legislation(
+                        knowledge_act.id,
+                        instrument.source_url,
+                        instrument.title,
+                        instrument.number,
+                        version.valid_from,
+                    )
+                    self.knowledge_repository.add_provisions(
+                        instrument.source_url,
+                        flattened,
+                        subsidiary_legislation_id=row.id,
+                    )
+                    self.raw_repository.mark_subsidiary_version_promoted(version)
+                    promoted += 1
 
-            parsed = self.parser.parse_html(version.html)
-            flattened = self.parser.flatten(parsed.provisions)
-            if (
-                parsed.parse_status != ParseStatus.COMPLETE
-                or parsed.extracted_provision_count != version.extracted_provision_count
-            ):
-                logger.warning(
-                    "Cannot promote %s: extract count %s != stored %s",
-                    instrument.slug,
-                    parsed.extracted_provision_count,
-                    version.extracted_provision_count,
-                )
-                skipped += 1
-                continue
-
-            knowledge_act = self.knowledge_repository.get_or_create_act(act.source_url, act.title)
-            row = self.knowledge_repository.add_subsidiary_legislation(
-                knowledge_act.id,
-                instrument.source_url,
-                instrument.title,
-                instrument.number,
-                version.valid_from,
-            )
-            self.knowledge_repository.add_provisions(
-                instrument.source_url,
-                flattened,
-                subsidiary_legislation_id=row.id,
-            )
-            self.raw_repository.mark_subsidiary_version_promoted(version)
-            promoted += 1
+            if processed % persist_every == 0:
+                self.knowledge_repository.session.commit()
+                self.raw_repository.session.commit()
 
         logger.info("Promoted %s subsidiary legislations, skipped %s", promoted, skipped)
         return promoted
@@ -190,10 +221,11 @@ class LegislationRawPromoter:
                 knowledge_repository=KnowledgeLegislationRepository(knowledge_session),
                 parser=LegislationDocumentParser(raw_repository),
             )
-            promoted_acts = promoter.promote_pending(max_versions, reporter)
+            limits = LegislationScrapeLimits()
+            promoted_acts = promoter.promote_pending(max_versions, reporter, limits)
             promoted_subsidiary = 0
             if include_subsidiary:
-                promoted_subsidiary = promoter.promote_pending_subsidiary(max_versions)
+                promoted_subsidiary = promoter.promote_pending_subsidiary(max_versions, limits)
             knowledge_session.commit()
             raw_session.commit()
 

@@ -15,7 +15,13 @@ class ScrapeLimits:
     document_pause_seconds: float = 1.0
     request_timeout_seconds: float = 30.0
     retry_limit: int = 3
+    gateway_retry_limit: int = 6
     retry_backoff_seconds: float = 2.0
+    discover_persist_every: int = 25
+    fetch_persist_every: int = 100
+    parse_persist_every: int = 100
+    promote_persist_every: int = 25
+    resolve_persist_every: int = 200
 
 
 @dataclass(frozen=True)

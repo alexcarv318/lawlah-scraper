@@ -15,10 +15,14 @@ class LegislationScrapeLimits:
     request_timeout_seconds: float = 60.0
     page_load_timeout_seconds: float = 45.0
     retry_limit: int = 3
+    gateway_retry_limit: int = 6
     retry_backoff_seconds: float = 2.0
     content_stall_seconds: float = 8.0
     http_467_pause_seconds: float = 300.0
     http_467_pause_cap_seconds: float = 2400.0
+    discover_persist_every: int = 50
+    parse_persist_every: int = 20
+    promote_persist_every: int = 10
 
 
 @dataclass(frozen=True)

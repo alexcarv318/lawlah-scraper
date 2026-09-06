@@ -3,7 +3,7 @@ from collections.abc import Sequence
 
 from bs4 import BeautifulSoup, Tag
 
-from src.cases.schema import DocumentParse, ExtractedParagraph
+from src.cases.schema import DocumentParse, ExtractedParagraph, ScrapeLimits
 from src.database import get_raw_source_session_maker
 from src.logger import get_logger
 from src.notify.schema import FailureItem, StageReport, StageReporter, emit_report, stored_failures
@@ -35,13 +35,15 @@ class CaseDocumentParser:
         self,
         max_documents: int | None,
         reporter: StageReporter | None = None,
+        limits: ScrapeLimits | None = None,
     ) -> StageReport:
+        persist_every = (limits or ScrapeLimits()).parse_persist_every
         pending = self.repository.get_documents_pending_parse(max_documents)
         logger.info("Parsing %s pending documents", len(pending))
 
         counts: Counter[ParseStatus] = Counter()
         failures: list[FailureItem] = []
-        for raw_case, document in pending:
+        for parsed, (raw_case, document) in enumerate(pending, start=1):
             result = self.parse_html(document.html)
             self.repository.save_parse_result(raw_case, document, result)
             counts[result.parse_status] += 1
@@ -49,6 +51,25 @@ class CaseDocumentParser:
             failure = self.parse_failure(raw_case.neutral_citation, result)
             if failure is not None:
                 failures.append(failure)
+            if parsed % persist_every == 0:
+                self.repository.session.commit()
+                emit_report(
+                    reporter,
+                    StageReport(
+                        stage="parse",
+                        counts={
+                            "parsed": parsed,
+                            "complete": counts[ParseStatus.COMPLETE],
+                            "incomplete": counts[ParseStatus.INCOMPLETE],
+                            "unknown layout": counts[ParseStatus.UNKNOWN_LAYOUT],
+                            "failed": counts[ParseStatus.FAILED],
+                        },
+                        failures=stored_failures(failures),
+                        in_progress=True,
+                        done=parsed,
+                        total=len(pending),
+                    ),
+                )
 
         logger.info(
             "Parsed %s documents: %s complete, %s incomplete, %s unknown_layout, %s failed",
@@ -296,6 +317,7 @@ class CaseRawParser:
             parsed = CaseDocumentParser(RawCaseRepository(session)).parse_pending(
                 max_documents,
                 reporter,
+                ScrapeLimits(),
             )
             session.commit()
 

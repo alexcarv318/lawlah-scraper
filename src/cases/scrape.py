@@ -9,9 +9,6 @@ from src.notify.schema import FailureItem, StageReport, StageReporter, emit_repo
 from src.raw.models.cases import FetchStatus
 from src.raw.repository import RawCaseRepository
 
-DISCOVER_PROGRESS_EVERY = 25
-FETCH_PROGRESS_EVERY = 100
-
 logger = get_logger(__name__)
 
 
@@ -66,8 +63,8 @@ class CaseSearchScraper:
 
             logger.info("Search page %s: %s hits, %s new cases", page_number, len(hits), added_on_page)
 
-            if page_number % DISCOVER_PROGRESS_EVERY == 0:
-
+            if page_number % self.client.limits.discover_persist_every == 0:
+                self.repository.session.commit()
                 emit_report(
                     reporter,
                     StageReport(
@@ -143,8 +140,9 @@ class CaseDocumentScraper:
                         result.fetch_error,
                     )
 
-            if fetched - last_progress >= FETCH_PROGRESS_EVERY:
+            if fetched - last_progress >= self.limits.fetch_persist_every:
                 last_progress = fetched
+                self.repository.session.commit()
 
                 emit_report(
                     reporter,

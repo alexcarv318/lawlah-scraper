@@ -11,6 +11,10 @@ from src.cases.schema import DocumentFetch, ScrapeLimits, SearchHit
 from src.logger import get_logger
 from src.raw.models.cases import FetchStatus
 
+RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
+GATEWAY_STATUS = frozenset({502, 503, 504})
+RETRY_WAIT_CAP_SECONDS = 60.0
+
 SEARCH_URL = "https://api.lawnet.com/search-service/api/lawnetcore/search/supreme-court"
 DOCUMENT_URL = "https://api.lawnet.com/search-service/api/lawnetcore/document/citation/v1"
 DOCUMENT_PAGE_URL = "https://www.lawnet.com/openlaw/cases/citation/{citation}?ref=sg-sc"
@@ -114,9 +118,18 @@ class LawNetClient:
         attempt = 0
         while True:
             response = self.http.post(url, json=payload)
-            if response.status_code == 429 and attempt < self.limits.retry_limit:
-                wait_seconds = self.limits.retry_backoff_seconds * (2**attempt)
-                logger.warning("LawNet rate limited, retrying in %s seconds", wait_seconds)
+            if self.should_retry(response.status_code, attempt):
+                wait_seconds = min(
+                    RETRY_WAIT_CAP_SECONDS,
+                    self.limits.retry_backoff_seconds * (2**attempt),
+                )
+                logger.warning(
+                    "LawNet %s for %s, retrying in %s seconds (attempt %s)",
+                    response.status_code,
+                    url,
+                    wait_seconds,
+                    attempt + 1,
+                )
                 sleep(wait_seconds)
                 attempt += 1
                 continue
@@ -126,6 +139,16 @@ class LawNetClient:
             if not isinstance(body, dict):
                 raise LawNetResponseError("LawNet response is not an object")
             return body
+
+    def should_retry(self, status_code: int, attempt: int) -> bool:
+        if status_code not in RETRYABLE_STATUS:
+            return False
+        limit = (
+            self.limits.gateway_retry_limit
+            if status_code in GATEWAY_STATUS
+            else self.limits.retry_limit
+        )
+        return attempt < limit
 
     @staticmethod
     def parse_search_hits(body: dict[str, object]) -> list[SearchHit]:

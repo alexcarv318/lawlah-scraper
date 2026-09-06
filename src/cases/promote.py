@@ -2,6 +2,7 @@ import re
 
 from src.cases.client import LawNetClient
 from src.cases.parse import CaseDocumentParser
+from src.cases.schema import ScrapeLimits
 from src.database import get_knowledge_base_session_maker, get_raw_source_session_maker
 from src.knowledge.repository import KnowledgeCaseRepository
 from src.logger import get_logger
@@ -59,7 +60,9 @@ class CasePromoter:
         self,
         max_cases: int | None,
         reporter: StageReporter | None = None,
+        limits: ScrapeLimits | None = None,
     ) -> StageReport:
+        persist_every = (limits or ScrapeLimits()).promote_persist_every
         pending = self.raw_repository.get_documents_pending_promote(max_cases)
         pending_citations = [raw_case.neutral_citation for raw_case, _ in pending]
 
@@ -75,19 +78,37 @@ class CasePromoter:
         already_in_kb = 0
         skipped = 0
         failures: list[FailureItem] = []
-        for raw_case, document in pending:
+        for processed, (raw_case, document) in enumerate(pending, start=1):
             if raw_case.neutral_citation in already_promoted:
                 self.raw_repository.mark_promoted(document)
                 already_in_kb += 1
-                continue
+            else:
+                skip_reason = self.promote_one(raw_case, document)
+                if skip_reason is not None:
+                    skipped += 1
+                    failures.append(FailureItem(raw_case.neutral_citation, skip_reason))
+                else:
+                    self.raw_repository.mark_promoted(document)
+                    promoted += 1
 
-            skip_reason = self.promote_one(raw_case, document)
-            if skip_reason is not None:
-                skipped += 1
-                failures.append(FailureItem(raw_case.neutral_citation, skip_reason))
-                continue
-            self.raw_repository.mark_promoted(document)
-            promoted += 1
+            if processed % persist_every == 0:
+                self.knowledge_repository.session.commit()
+                self.raw_repository.session.commit()
+                emit_report(
+                    reporter,
+                    StageReport(
+                        stage="promote",
+                        counts={
+                            "promoted": promoted,
+                            "already in knowledge base": already_in_kb,
+                            "failed": skipped,
+                        },
+                        failures=stored_failures(failures),
+                        in_progress=True,
+                        done=processed,
+                        total=len(pending),
+                    ),
+                )
 
         logger.info("Promoted %s cases, skipped %s", promoted, skipped)
         report = StageReport(
@@ -419,7 +440,7 @@ class CaseRawPromoter:
                 parser=CaseDocumentParser(raw_repository),
             )
 
-            promoted = case_promoter.promote_pending(max_cases, reporter)
+            promoted = case_promoter.promote_pending(max_cases, reporter, ScrapeLimits())
             knowledge_session.commit()
             raw_session.commit()
 

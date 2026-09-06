@@ -1,5 +1,6 @@
 import re
 
+from src.cases.schema import ScrapeLimits
 from src.database import get_knowledge_base_session_maker
 from src.knowledge.models.aliases import Alias
 from src.knowledge.models.cases import Case
@@ -22,7 +23,11 @@ class ReferenceResolver:
         with session_maker() as session:
             repository = KnowledgeCaseRepository(session)
             unresolved = repository.get_unresolved_references(max_references)
-            resolved = ReferenceResolver.resolve_rows(repository, unresolved)
+            resolved = ReferenceResolver.resolve_rows(
+                repository,
+                unresolved,
+                persist_every=ScrapeLimits().resolve_persist_every,
+            )
             session.commit()
 
         logger.info("Resolved %s of %s references", resolved, len(unresolved))
@@ -39,6 +44,7 @@ class ReferenceResolver:
     def resolve_rows(
         repository: KnowledgeCaseRepository,
         unresolved: list[Reference],
+        persist_every: int | None = None,
     ) -> int:
         if not unresolved:
             return 0
@@ -60,13 +66,14 @@ class ReferenceResolver:
         by_ordinal = repository.get_paragraphs_by_case_ordinal(list(case_ids))
 
         resolved = 0
-        for reference in unresolved:
+        for processed, reference in enumerate(unresolved, start=1):
             source = paragraphs.get(reference.source_paragraph_id)
-            if source is None:
-                continue
-            alias = aliases.get(reference.alias_id) if reference.alias_id is not None else None
-            if ReferenceResolver.resolve_one(reference, source, alias, cases, by_ordinal):
-                resolved += 1
+            if source is not None:
+                alias = aliases.get(reference.alias_id) if reference.alias_id is not None else None
+                if ReferenceResolver.resolve_one(reference, source, alias, cases, by_ordinal):
+                    resolved += 1
+            if persist_every is not None and processed % persist_every == 0:
+                repository.session.commit()
         return resolved
 
     @staticmethod
