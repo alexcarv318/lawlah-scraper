@@ -161,7 +161,7 @@ require_checkpoints() {
 
 run_pipeline() {
   cd "${REPO_DIR}"
-  uv run python -m src.pipeline "$@"
+  PYTHONUNBUFFERED=1 uv run python -m src.pipeline "$@"
 }
 
 stop_this_instance() {

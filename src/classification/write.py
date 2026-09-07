@@ -1,6 +1,8 @@
 from src.classification.classify import Classification, Classifier
+from src.classification.schema import ClassificationLimits
 from src.database import get_knowledge_base_session_maker
 from src.embeddings.embed import KnowledgeEmbedder
+from src.knowledge.models.paragraphs import Paragraph
 from src.knowledge.models.provisions import Provision
 from src.knowledge.models.taxonomy import Concept, FunctionalRole, FunctionalRoleAppliesTo, Topic
 from src.knowledge.repository import (
@@ -10,9 +12,6 @@ from src.knowledge.repository import (
 )
 from src.logger import get_logger
 from src.notify.schema import StageReport, StageReporter, emit_report
-
-COMMIT_EVERY = 32
-CLASSIFY_PROGRESS_EVERY = 200
 
 logger = get_logger(__name__)
 
@@ -82,51 +81,81 @@ class KnowledgeClassifier:
         self,
         max_paragraphs: int | None = None,
         reporter: StageReporter | None = None,
+        limits: ClassificationLimits | None = None,
     ) -> StageReport:
         classifier = Classifier.load("judgments")
+        limits = limits or ClassificationLimits()
         session_maker = get_knowledge_base_session_maker()
 
         with session_maker() as session:
-            case_repository = KnowledgeCaseRepository(session)
-            taxonomy = self.load_taxonomy(KnowledgeTaxonomyRepository(session))
-            pending = case_repository.get_paragraphs_pending_classification(max_paragraphs)
-            logger.info("Classifying %s paragraphs", len(pending))
+            total_pending = KnowledgeCaseRepository(session).count_paragraphs_pending_classification()
+        total = total_pending if max_paragraphs is None else min(total_pending, max_paragraphs)
+        logger.info(
+            "Classifying %s paragraphs in batches of %s",
+            total,
+            limits.batch_size,
+        )
 
-            classified = 0
-            skipped_empty = 0
-            for paragraph in pending:
-                if not paragraph.content.strip():
-                    skipped_empty += 1
-                    continue
-                role_id, topic_ids, concept_ids = self.label_ids(
-                    taxonomy,
-                    classifier.classify(paragraph.content),
-                    FunctionalRoleAppliesTo.CASE,
+        classified = 0
+        skipped_empty = 0
+        after_id: int | None = None
+        while max_paragraphs is None or classified < max_paragraphs:
+            with session_maker() as session:
+                case_repository = KnowledgeCaseRepository(session)
+                taxonomy = self.load_taxonomy(KnowledgeTaxonomyRepository(session))
+                pending = case_repository.get_paragraphs_pending_classification(
+                    limits.batch_size,
+                    after_id,
                 )
-                case_repository.save_paragraph_classification(
-                    paragraph,
-                    role_id,
-                    topic_ids,
-                    concept_ids,
-                )
-                classified += 1
-                if classified % COMMIT_EVERY == 0:
-                    session.commit()
-                    logger.info("Classified %s of %s paragraphs", classified, len(pending))
-                if classified % CLASSIFY_PROGRESS_EVERY == 0:
+                if not pending:
+                    break
 
-                    emit_report(
-                        reporter,
-                        StageReport(
-                            stage="classify",
-                            counts={"classified": classified},
-                            in_progress=True,
-                            done=classified,
-                            total=len(pending),
-                        ),
+                after_id = pending[-1].id
+                nonempty: list[Paragraph] = []
+                for paragraph in pending:
+                    if paragraph.content.strip():
+                        nonempty.append(paragraph)
+                    else:
+                        skipped_empty += 1
+
+                if max_paragraphs is not None:
+                    nonempty = nonempty[: max_paragraphs - classified]
+                if nonempty:
+                    logger.info(
+                        "Classifying paragraph ids %s–%s (%s texts, %s done of %s)",
+                        nonempty[0].id,
+                        nonempty[-1].id,
+                        len(nonempty),
+                        classified,
+                        total,
                     )
-
-            session.commit()
+                    results = classifier.classify_many([paragraph.content for paragraph in nonempty])
+                    for paragraph, result in zip(nonempty, results, strict=True):
+                        role_id, topic_ids, concept_ids = self.label_ids(
+                            taxonomy,
+                            result,
+                            FunctionalRoleAppliesTo.CASE,
+                        )
+                        case_repository.save_paragraph_classification(
+                            paragraph,
+                            role_id,
+                            topic_ids,
+                            concept_ids,
+                        )
+                    classified += len(nonempty)
+                    session.commit()
+                    logger.info("Classified %s of %s paragraphs", classified, total)
+                    if classified == len(nonempty) or classified % limits.progress_every == 0:
+                        emit_report(
+                            reporter,
+                            StageReport(
+                                stage="classify",
+                                counts={"classified": classified},
+                                in_progress=True,
+                                done=classified,
+                                total=total,
+                            ),
+                        )
 
         logger.info("Paragraph classification finished: %s paragraphs", classified)
         report = StageReport(

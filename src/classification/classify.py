@@ -89,8 +89,17 @@ def load_head(path: Path, device: torch.device) -> TrainedHead:
     )
 
 
-def predict_logits(head: TrainedHead, text: str) -> Tensor:
-    tokens = head.tokenizer(text, truncation=True, max_length=head.max_length, return_tensors="pt")
+def predict_logits(head: TrainedHead, texts: list[str]) -> Tensor:
+    if not texts:
+        raise ValueError("texts must not be empty")
+
+    tokens = head.tokenizer(
+        texts,
+        truncation=True,
+        padding=True,
+        max_length=head.max_length,
+        return_tensors="pt",
+    )
     input_ids = tokens["input_ids"]
     attention_mask = tokens["attention_mask"]
     if not isinstance(input_ids, Tensor) or not isinstance(attention_mask, Tensor):
@@ -99,7 +108,7 @@ def predict_logits(head: TrainedHead, text: str) -> Tensor:
     input_ids = input_ids.to(head.device)
     attention_mask = attention_mask.to(head.device)
 
-    with torch.no_grad():
+    with torch.inference_mode():
         logits = head.model(input_ids=input_ids, attention_mask=attention_mask)
 
     if not isinstance(logits, Tensor):
@@ -126,34 +135,64 @@ class Classifier:
         return cls(role=heads["role"], topics=heads["topics"], concepts=heads["concepts"])
 
     def classify(self, text: str, previous_text: str = "") -> Classification:
-        role_logits = predict_logits(self.role, role_input(text=text, previous_text=previous_text))
-        role = self.scheme.roles[int(role_logits[0].argmax())]
+        return self.classify_many([text], [previous_text])[0]
 
-        topic_scores = predict_logits(self.topics, text)[0].sigmoid()
+    def classify_many(
+        self,
+        texts: list[str],
+        previous_texts: list[str] | None = None,
+    ) -> list[Classification]:
+        if not texts:
+            return []
+        if previous_texts is None:
+            previous_texts = [""] * len(texts)
+        if len(previous_texts) != len(texts):
+            raise ValueError("previous_texts must match texts")
+
+        role_logits = predict_logits(
+            self.role,
+            [role_input(text=text, previous_text=previous) for text, previous in zip(texts, previous_texts, strict=True)],
+        )
         topic_flags = apply_thresholds(
-            scores=topic_scores.unsqueeze(0),
+            scores=predict_logits(self.topics, texts).sigmoid(),
             thresholds=self.topics.thresholds,
             maximum=maximum_labels("topics"),
-        )[0].tolist()
-        topics = self.scheme.decode_topics(topic_flags)
+        )
+        topic_flag_rows = topic_flags.tolist()
+        topics_by_row = [self.scheme.decode_topics(row) for row in topic_flag_rows]
 
-        concept_text = concept_input(text=text, topics=list(topics))
-        concept_scores = predict_logits(self.concepts, concept_text)[0].sigmoid()
-        allowed = torch.tensor(self.scheme.concept_mask(topic_flags), device=concept_scores.device)
-        concept_predictions = apply_thresholds(
-            scores=concept_scores.unsqueeze(0),
+        concept_scores = predict_logits(
+            self.concepts,
+            [
+                concept_input(text=text, topics=list(topics))
+                for text, topics in zip(texts, topics_by_row, strict=True)
+            ],
+        ).sigmoid()
+        allowed = torch.tensor(
+            [self.scheme.concept_mask(row) for row in topic_flag_rows],
+            device=concept_scores.device,
+        )
+        concept_flags = apply_thresholds(
+            scores=concept_scores,
             thresholds=self.concepts.thresholds,
             maximum=maximum_labels("concepts"),
-        )[0]
-        concept_flags: list[float] = []
-        for flag in (concept_predictions * allowed).tolist():
-            concept_flags.append(float(flag))
+        ) * allowed
 
-        return Classification(
-            role=role,
-            topics=topics,
-            concepts=self.scheme.decode_concepts(concept_flags),
-        )
+        results: list[Classification] = []
+        for role_row, topics, concept_row in zip(
+            role_logits,
+            topics_by_row,
+            concept_flags.tolist(),
+            strict=True,
+        ):
+            results.append(
+                Classification(
+                    role=self.scheme.roles[int(role_row.argmax())],
+                    topics=topics,
+                    concepts=self.scheme.decode_concepts(concept_row),
+                )
+            )
+        return results
 
 
 def main() -> None:

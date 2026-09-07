@@ -1,6 +1,6 @@
 from datetime import date
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from src.aliases.schema import ExtractedAlias
@@ -151,12 +151,21 @@ class KnowledgeCaseRepository:
     def save_paragraph_embedding(paragraph: Paragraph, embedding: list[float]) -> None:
         paragraph.embedding = embedding
 
-    def get_paragraphs_pending_classification(self, limit: int | None) -> list[Paragraph]:
-        stmt = (
-            select(Paragraph)
-            .where(Paragraph.functional_role_id.is_(None))
-            .order_by(Paragraph.case_id, Paragraph.ordinal)
+    def count_paragraphs_pending_classification(self) -> int:
+        found = self.session.scalar(
+            select(func.count()).select_from(Paragraph).where(Paragraph.functional_role_id.is_(None))
         )
+        return int(found or 0)
+
+    def get_paragraphs_pending_classification(
+        self,
+        limit: int | None,
+        after_id: int | None = None,
+    ) -> list[Paragraph]:
+        stmt = select(Paragraph).where(Paragraph.functional_role_id.is_(None))
+        if after_id is not None:
+            stmt = stmt.where(Paragraph.id > after_id)
+        stmt = stmt.order_by(Paragraph.id)
         if limit is not None:
             stmt = stmt.limit(limit)
         found = self.session.scalars(stmt)
