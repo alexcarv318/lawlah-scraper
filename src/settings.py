@@ -5,6 +5,8 @@ from urllib.parse import quote_plus
 from playwright.sync_api import ProxySettings
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.classification.schema import ClassificationMode
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -18,6 +20,12 @@ class Settings(BaseSettings):
 
     raw_source_database: str = "raw_source"
     knowledge_base_database: str = "knowledge_base"
+
+    classify_mode: ClassificationMode = ClassificationMode.LOCAL
+    classify_url: str | None = None
+    classify_instance_id: str | None = None
+    classify_idle_seconds: int = 300
+    aws_region: str | None = None
 
     proxy_dns: str | None = None
     proxy_port: int | None = None

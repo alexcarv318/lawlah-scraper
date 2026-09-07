@@ -119,6 +119,10 @@ optional_keys = (
     "PROXY_PORT",
     "PROXY_USERNAME",
     "PROXY_PASSWORD",
+    "CLASSIFY_MODE",
+    "CLASSIFY_URL",
+    "CLASSIFY_INSTANCE_ID",
+    "AWS_REGION",
 )
 for key in optional_keys:
     value = app.get(key)
@@ -135,6 +139,41 @@ for key, value in lines.items():
 env_path.write_text("\n".join(rendered) + "\n")
 print(f"Wrote {env_path}")
 PY
+
+  write_classify_env
+}
+
+write_classify_env() {
+  local env_path instance_id private_ip
+  env_path="${REPO_DIR}/.env"
+  if grep -q '^CLASSIFY_MODE=' "${env_path}"; then
+    return
+  fi
+
+  instance_id="$(aws ec2 describe-instances \
+    --region "$(aws_region)" \
+    --filters "Name=tag:Name,Values=lawlah-classifier" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+    --query 'Reservations[0].Instances[0].InstanceId' \
+    --output text)"
+  private_ip="$(aws ec2 describe-instances \
+    --region "$(aws_region)" \
+    --filters "Name=tag:Name,Values=lawlah-classifier" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+    --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+    --output text)"
+
+  if [ -z "${instance_id}" ] || [ "${instance_id}" = "None" ]; then
+    echo "CLASSIFY_MODE=\"local\"" >> "${env_path}"
+    echo "Classifier instance not found; CLASSIFY_MODE=local" >&2
+    return
+  fi
+
+  {
+    printf 'CLASSIFY_MODE=%s\n' '"remote"'
+    printf 'CLASSIFY_URL=%s\n' "\"http://${private_ip}:8080\""
+    printf 'CLASSIFY_INSTANCE_ID=%s\n' "\"${instance_id}\""
+    printf 'AWS_REGION=%s\n' "\"$(aws_region)\""
+  } >> "${env_path}"
+  echo "Wrote remote classifier ${instance_id} at ${private_ip}"
 }
 
 require_checkpoints() {

@@ -2,7 +2,7 @@ from src.aliases.extract import CaseAliasExtractor
 from src.cases.parse import CaseRawParser
 from src.cases.promote import CaseRawPromoter
 from src.cases.scrape import CaseRawScraper
-from src.classification.write import KnowledgeClassifier
+from src.classification.service import KnowledgeClassifier
 from src.embeddings.embed import KnowledgeEmbedder
 from src.legislation.parse import LegislationRawParser
 from src.legislation.promote import LegislationRawPromoter

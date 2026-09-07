@@ -77,7 +77,7 @@ class TelegramNotifier:
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="telegram")
 
     def send(self, text: str) -> None:
-        self.pool.submit(self.send_safe, text)
+        self.send_safe(text)
 
     def send_safe(self, text: str) -> None:
         subscribers = self.registry.subscribers()

@@ -1,0 +1,19 @@
+[project]
+name = "lawlah-classifier"
+version = "0.1.0"
+description = "Scoped Lawlah classification API"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.40.0",
+    "datasets>=5.0.1",
+    "fastapi>=0.128.0",
+    "httpx>=0.28.1",
+    "pydantic>=2.11.0",
+    "sentencepiece>=0.2.2",
+    "torch>=2.13.0",
+    "transformers>=5.16.1",
+    "uvicorn>=0.35.0",
+]
+
+[tool.uv]
+package = false

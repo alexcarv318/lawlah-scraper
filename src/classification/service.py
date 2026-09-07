@@ -1,5 +1,10 @@
-from src.classification.classify import Classification, Classifier
-from src.classification.schema import ClassificationLimits
+from src.classification.repository import LocalClassifier, RemoteClassifier
+from src.classification.schema import (
+    Classification,
+    ClassificationLimits,
+    ClassificationMode,
+    ParagraphClassifier,
+)
 from src.database import get_knowledge_base_session_maker
 from src.embeddings.embed import KnowledgeEmbedder
 from src.knowledge.models.paragraphs import Paragraph
@@ -12,8 +17,26 @@ from src.knowledge.repository import (
 )
 from src.logger import get_logger
 from src.notify.schema import StageReport, StageReporter, emit_report
+from src.settings import get_settings
 
 logger = get_logger(__name__)
+
+
+def load_classifier(source: str) -> ParagraphClassifier:
+    settings = get_settings()
+    if settings.classify_mode == ClassificationMode.REMOTE:
+        if not settings.classify_url:
+            raise ValueError("CLASSIFY_URL is required when CLASSIFY_MODE=remote")
+        logger.info("Using remote classifier %s for %s", settings.classify_url, source)
+        return RemoteClassifier(
+            source=source,
+            base_url=settings.classify_url,
+            instance_id=settings.classify_instance_id,
+            region=settings.aws_region or "ap-south-1",
+        )
+
+    logger.info("Using local classifier for %s", source)
+    return LocalClassifier.load(source)
 
 
 class TaxonomyLookup:
@@ -83,7 +106,7 @@ class KnowledgeClassifier:
         reporter: StageReporter | None = None,
         limits: ClassificationLimits | None = None,
     ) -> StageReport:
-        classifier = Classifier.load("judgments")
+        classifier = load_classifier("judgments")
         limits = limits or ClassificationLimits()
         session_maker = get_knowledge_base_session_maker()
 
@@ -172,7 +195,7 @@ class KnowledgeClassifier:
         max_provisions: int | None = None,
         reporter: StageReporter | None = None,
     ) -> StageReport:
-        classifier = Classifier.load("legislation")
+        classifier = load_classifier("legislation")
         session_maker = get_knowledge_base_session_maker()
 
         with session_maker() as session:
@@ -208,7 +231,7 @@ class KnowledgeClassifier:
 
     def classify_document_sections(
         self,
-        classifier: Classifier,
+        classifier: ParagraphClassifier,
         repository: KnowledgeLegislationRepository,
         taxonomy: TaxonomyLookup,
         nodes: list[Provision],
