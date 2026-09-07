@@ -11,6 +11,7 @@
 
 set -euo pipefail
 
+export HOME="${HOME:-/home/ubuntu}"
 CLASSIFIER_DIR="${LAWLAH_CLASSIFIER_DIR:-/home/ubuntu/lawlah-classifier}"
 
 if [ "$(id -u)" -eq 0 ]; then

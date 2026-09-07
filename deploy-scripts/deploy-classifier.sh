@@ -9,6 +9,7 @@
 
 set -euo pipefail
 
+export HOME="${HOME:-/home/ubuntu}"
 CLASSIFIER_DIR="${LAWLAH_CLASSIFIER_DIR:-/home/ubuntu/lawlah-classifier}"
 REPO_CACHE="${LAWLAH_SCRAPER_CACHE:-/tmp/lawlah-scraper}"
 DEPLOY_KEY_SECRET="${LAWLAH_SCRAPER_DEPLOY_KEY_SECRET:-lawlah/scraper-deploy-key}"
