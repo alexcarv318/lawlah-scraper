@@ -18,7 +18,7 @@ source "${SCRIPT_DIR}/common.sh"
 
 run_backfill() {
   require_checkpoints
-  run_pipeline cases backfill
+  # run_pipeline cases backfill
   run_pipeline paragraphs
   run_pipeline acts backfill
 }

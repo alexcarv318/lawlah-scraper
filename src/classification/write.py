@@ -24,12 +24,12 @@ class TaxonomyLookup:
         topics: dict[str, Topic],
         concepts: dict[str, Concept],
     ) -> None:
-        self.roles = roles
-        self.topics = topics
-        self.concepts = concepts
+        self.roles = {name.casefold(): role for name, role in roles.items()}
+        self.topics = {name.casefold(): topic for name, topic in topics.items()}
+        self.concepts = {name.casefold(): concept for name, concept in concepts.items()}
 
     def role_id(self, name: str, applies_to: FunctionalRoleAppliesTo) -> int:
-        role = self.roles.get(name)
+        role = self.roles.get(name.casefold())
         if role is None:
             raise ValueError(f"Unknown functional role {name!r}")
         if role.applies_to != applies_to:
@@ -41,7 +41,7 @@ class TaxonomyLookup:
     def topic_ids(self, names: tuple[str, ...]) -> list[int]:
         ids: list[int] = []
         for name in names:
-            topic = self.topics.get(name)
+            topic = self.topics.get(name.casefold())
             if topic is None:
                 raise ValueError(f"Unknown topic {name!r}")
             ids.append(topic.id)
@@ -50,7 +50,7 @@ class TaxonomyLookup:
     def concept_ids(self, names: tuple[str, ...]) -> list[int]:
         ids: list[int] = []
         for name in names:
-            concept = self.concepts.get(name)
+            concept = self.concepts.get(name.casefold())
             if concept is None:
                 raise ValueError(f"Unknown concept {name!r}")
             ids.append(concept.id)
